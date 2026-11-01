@@ -1,0 +1,16 @@
+# Resolved from where this file actually lies, not from the prefix that
+# happened to be set when the build was configured: `cmake --install --prefix`
+# chooses the destination at install time, and the CMake package beside this
+# one is already relocatable through @PACKAGE_INIT@.
+prefix=${pcfiledir}/@RMLINES_PC_PREFIX_RELATIVE@
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: rmlines
+Description: @CMAKE_PROJECT_DESCRIPTION@
+URL: @CMAKE_PROJECT_HOMEPAGE_URL@
+Version: @PROJECT_VERSION@
+Cflags: -I${includedir}
+Libs: -L${libdir} -lrmlines
+Libs.private: @RMLINES_PC_LIBS_PRIVATE@

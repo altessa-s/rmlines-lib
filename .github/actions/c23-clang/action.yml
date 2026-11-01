@@ -1,0 +1,29 @@
+# Copyright 2026 ALTESSA SOLUTIONS INC.
+# Use of this source code is governed by an MIT-style license that can be
+# found in the LICENSE file.
+
+name: A clang that speaks C23
+description: >
+  Installs a clang new enough for this library on an Ubuntu runner and
+  exports it as CC. The clang the runner ships — 18 on Ubuntu 24.04 — reads
+  `constexpr` as an unknown type name; the keyword arrived in clang 19, and
+  the identifier ranges the writer hands out are checked against each other
+  with it in `static_assert`, where nothing weaker will do.
+inputs:
+  version:
+    description: The major version of LLVM to install.
+    required: false
+    default: "19"
+runs:
+  using: composite
+  steps:
+    - name: Install clang ${{ inputs.version }} from apt.llvm.org
+      shell: bash
+      run: |
+        wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+        chmod +x /tmp/llvm.sh
+        sudo /tmp/llvm.sh ${{ inputs.version }}
+        # The sanitizer and libFuzzer runtimes live in their own package.
+        sudo apt-get install -y "libclang-rt-${{ inputs.version }}-dev"
+        echo "CC=clang-${{ inputs.version }}" >> "$GITHUB_ENV"
+        clang-${{ inputs.version }} --version | head -1

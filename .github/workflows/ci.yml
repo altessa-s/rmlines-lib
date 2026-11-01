@@ -1,0 +1,177 @@
+# Copyright 2026 ALTESSA SOLUTIONS INC.
+# Use of this source code is governed by an MIT-style license that can be
+# found in the LICENSE file.
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.os }} / ${{ matrix.cc }} / ${{ matrix.shared && 'shared' || 'static' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        cc: [gcc, clang]
+        shared: [false, true]
+        exclude:
+          # Apple's toolchain is the one clang that ships on macOS runners;
+          # a second compiler there would test the runner, not the library.
+          - os: macos-latest
+            cc: gcc
+    steps:
+      - uses: actions/checkout@v7
+
+      # The runner's own clang is one release too old for C23 `constexpr`;
+      # its gcc, and Apple's clang, are not. The two steps are one decision
+      # spelled twice — the second is the exact negation of the first — and
+      # not a check on `env.CC`, which the `if` context does not reliably see
+      # after a step has written it to GITHUB_ENV.
+      - name: Install a C23 clang
+        if: runner.os == 'Linux' && matrix.cc == 'clang'
+        uses: ./.github/actions/c23-clang
+      - name: Name the compiler
+        if: ${{ !(runner.os == 'Linux' && matrix.cc == 'clang') }}
+        run: echo "CC=${{ matrix.cc }}" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: |
+          echo "CC=$CC"; "$CC" --version | head -1
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=${{ matrix.shared && 'ON' || 'OFF' }} \
+            -DRMLINES_WERROR=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: cmake --build build --target check
+
+      # The contract and nothing else: the arena, the hash map and the byte
+      # reader are hidden, so a consumer cannot link against plumbing that is
+      # free to change.
+      - name: Check the exported symbols
+        if: matrix.shared
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            exported=$(nm -gU build/librmlines.dylib | awk '{print $3}' | sed 's/^_//' | grep '^rm_' | sort)
+          else
+            exported=$(nm -D --defined-only build/librmlines.so | awk '{print $3}' | grep '^rm_' | sort)
+          fi
+          echo "$exported"
+          count=$(echo "$exported" | wc -l)
+          test "$count" -eq 32 || { echo "expected 32 exported functions, found $count"; exit 1; }
+
+      # `-std=c2x` and not `-std=c23`: the two name one standard, and gcc 13 —
+      # the runner's gcc — knows only the older spelling. Every compiler CI
+      # builds with takes it; the CMake build above never spells the flag at
+      # all, and lets CMake pick the one the compiler answers to.
+      - name: Install and consume
+        run: |
+          cmake --install build --prefix "$PWD/stage"
+          cat > /tmp/consumer.c <<'SRC'
+          #include <rmlines/rmlines.h>
+          #include <stdio.h>
+          int main(void) {
+              int version = 0;
+              rm_header_version(RM_HEADER, sizeof(RM_HEADER) - 1, &version);
+              printf("version %d\n", version);
+              return version == RM_SUPPORTED_VERSION ? 0 : 1;
+          }
+          SRC
+          PKG_CONFIG_PATH="$PWD/stage/lib/pkgconfig:$PWD/stage/lib64/pkgconfig" \
+            "$CC" -std=c2x /tmp/consumer.c \
+            $(PKG_CONFIG_PATH="$PWD/stage/lib/pkgconfig:$PWD/stage/lib64/pkgconfig" pkg-config --cflags --libs rmlines) \
+            -o /tmp/consumer
+          LD_LIBRARY_PATH="$PWD/stage/lib:$PWD/stage/lib64" DYLD_LIBRARY_PATH="$PWD/stage/lib" /tmp/consumer
+
+  # Windows with clang, not MSVC: the code is C23 throughout — `constexpr`,
+  # `nullptr`, `[[nodiscard]]`, typed enums — and MSVC's C compiler reads none
+  # of it. clang on Windows targets the MSVC ABI and links with its linker and
+  # SDK, which is what the developer-command step puts on the path.
+  windows:
+    name: windows-latest / clang / ${{ matrix.shared && 'shared' || 'static' }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shared: [false, true]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Install a C23 clang and Ninja
+        shell: bash
+        run: |
+          choco upgrade llvm ninja -y --no-progress
+          echo "C:\Program Files\LLVM\bin" >> "$GITHUB_PATH"
+      - name: Configure
+        shell: bash
+        run: |
+          clang --version | head -1
+          cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=${{ matrix.shared && 'ON' || 'OFF' }} \
+            -DRMLINES_WERROR=ON
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: cmake --build build --target check
+
+  sanitizers:
+    name: Address and undefined behaviour
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/c23-clang
+      - name: Configure
+        run: |
+          echo "CC=$CC"; "$CC" --version | head -1
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
+      - name: Test
+        run: cmake --build build --target check
+
+  # The suites above prove what the parser reads; this one proves what it does
+  # with bytes nobody wrote. Every `.rm` reaches this library off a device and
+  # through a sync, so the input is untrusted in the only sense that matters —
+  # it is not our own writer that produced it. The sample fixtures are the
+  # seeds; a crash, a leak or an overflow lands as a failing job with the input
+  # attached.
+  fuzz:
+    name: Fuzz the parser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/c23-clang
+      - name: Configure
+        run: |
+          echo "CC=$CC"; "$CC" --version | head -1
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DRMLINES_BUILD_FUZZERS=ON \
+            -DCMAKE_C_FLAGS="-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
+      - name: Build
+        run: cmake --build build --target fuzz_parse
+      - name: Run
+        run: |
+          mkdir -p corpus
+          cp tests/fixtures/v6-samples/*.rm tests/fixtures/*.rm corpus/
+          ./build/fuzz_parse corpus \
+            -max_total_time=120 -max_len=65536 -print_final_stats=1
+      - name: Keep whatever crashed
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-findings
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+          if-no-files-found: ignore

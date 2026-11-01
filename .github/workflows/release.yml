@@ -1,0 +1,106 @@
+# Copyright 2026 ALTESSA SOLUTIONS INC.
+# Use of this source code is governed by an MIT-style license that can be
+# found in the LICENSE file.
+
+# A release is a tag. Pushing `v1.2.3` checks that the header says 1.2.3 —
+# the version lives there and nowhere else, and a tag that disagrees with it
+# is refused before anything is built — then builds, tests and packages the
+# static library, the headers and `rmdump` for the three platforms CI covers,
+# and publishes them as a GitHub release with generated notes.
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: The tag names the header's version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.header.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: header
+        run: |
+          read_part() { sed -n "s/^#define RMLINES_VERSION_$1 \([0-9]*\)$/\1/p" include/rmlines/rmlines.h; }
+          version="$(read_part MAJOR).$(read_part MINOR).$(read_part PATCH)"
+          tag="${GITHUB_REF_NAME#v}"
+          echo "header says $version, tag says $tag"
+          test "$version" = "$tag" || { echo "::error::the tag does not match include/rmlines/rmlines.h"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  package:
+    name: ${{ matrix.name }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: linux-x86_64, cc: gcc }
+          - { os: macos-latest, name: macos-arm64, cc: clang }
+          - { os: windows-latest, name: windows-x86_64, cc: clang }
+    steps:
+      - uses: actions/checkout@v7
+      # Windows builds with clang against the MSVC SDK, as ci.yml does.
+      - if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - if: runner.os == 'Windows'
+        name: Install a C23 clang and Ninja
+        shell: bash
+        run: |
+          choco upgrade llvm ninja -y --no-progress
+          echo "C:\Program Files\LLVM\bin" >> "$GITHUB_PATH"
+      - name: Configure
+        shell: bash
+        env:
+          CC: ${{ matrix.cc }}
+        run: |
+          "$CC" --version | head -1
+          if [ "${{ runner.os }}" = "Windows" ]; then generator="-G Ninja"; else generator=""; fi
+          cmake -S . -B build $generator -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: cmake --build build --config Release --target check
+      - name: Package
+        shell: bash
+        run: |
+          name="rmlines-${{ needs.verify.outputs.version }}-${{ matrix.name }}"
+          cmake --install build --config Release --prefix "stage/$name"
+          cp LICENSE COPYRIGHT README.md "stage/$name/"
+          mkdir -p dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            (cd stage && cmake -E tar cf "../dist/$name.zip" --format=zip "$name")
+          else
+            (cd stage && tar czf "../dist/$name.tar.gz" "$name")
+          fi
+          ls -l dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: [verify, package]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "rmlines ${{ needs.verify.outputs.version }}" \
+            --generate-notes --verify-tag

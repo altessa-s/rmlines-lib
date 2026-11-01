@@ -1,0 +1,71 @@
+# Copyright 2026 ALTESSA SOLUTIONS INC.
+# Use of this source code is governed by an MIT-style license that can be
+# found in the LICENSE file.
+
+# The long form of the fuzz job in ci.yml. Two minutes on every push find
+# what is shallow; forty-five minutes a night, on a corpus that carries over
+# from one night to the next, find what is not. The corpus is cached rather
+# than committed — it is a working set, not a fixture.
+name: Nightly fuzz
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: How long to fuzz for.
+        required: false
+        default: "45"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz the parser for ${{ inputs.minutes || 45 }} minutes
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/c23-clang
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DRMLINES_BUILD_FUZZERS=ON
+          -DCMAKE_C_FLAGS="-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
+      - name: Build
+        run: cmake --build build --target fuzz_parse
+
+      # Whatever last night found interesting, plus the fixtures as a floor.
+      # The key changes on every run so that the cache is written back; the
+      # restore key is what carries the previous night forward.
+      - name: Restore the corpus
+        uses: actions/cache@v6
+        with:
+          path: corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - name: Seed the corpus
+        run: |
+          mkdir -p corpus
+          cp tests/fixtures/v6-samples/*.rm tests/fixtures/*.rm corpus/
+
+      - name: Fuzz
+        run: |
+          seconds=$(( ${{ inputs.minutes || 45 }} * 60 ))
+          ./build/fuzz_parse corpus \
+            -max_total_time="$seconds" -max_len=65536 -print_final_stats=1
+
+      - name: Keep whatever crashed
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-findings-${{ github.run_id }}
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+          if-no-files-found: ignore

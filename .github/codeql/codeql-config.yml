@@ -1,0 +1,17 @@
+# Copyright 2026 ALTESSA SOLUTIONS INC.
+# Use of this source code is governed by an MIT-style license that can be
+# found in the LICENSE file.
+
+# What the CodeQL job fails on: the security queries, and none of the quality
+# ones. The quality suite reads this C23 code poorly — statics it calls unused
+# are read on the next line, a loop counter it calls always nought grows on
+# every turn — and a gate that fails on those is a gate somebody turns off.
+name: rmlines CodeQL
+queries:
+  - uses: security-extended
+query-filters:
+  # `rmdump` opens the file named on its command line; that is what the tool
+  # is for. The library itself takes bytes and opens no file, so the rule has
+  # nothing else to find here.
+  - exclude:
+      id: cpp/path-injection

@@ -1,0 +1,16 @@
+# CMake
+build/
+build-*/
+cmake-build-*/
+
+# Compiler and analyser output
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.dSYM/
+compile_commands.json
+.cache/
+
+.DS_Store

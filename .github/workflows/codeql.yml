@@ -1,0 +1,63 @@
+# Copyright 2026 ALTESSA SOLUTIONS INC.
+# Use of this source code is governed by an MIT-style license that can be
+# found in the LICENSE file.
+
+# GitHub's own static analysis over the C sources. The build is spelled out
+# rather than left to autobuild, so that the analysed objects are the ones the
+# library ships: the tests and the tool are built too, and every warning the
+# project turns on is on here as well.
+name: CodeQL
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  schedule:
+    - cron: "23 4 * * 1"
+
+# The results are not uploaded to GitHub: code scanning on a private
+# repository needs a paid Code Security licence, and the upload is refused
+# without one. They stay here instead — kept as an artifact, and a finding of
+# level error or warning fails the job, so the analysis cannot pass in silence.
+permissions:
+  contents: read
+  # The analyze step reads its own workflow run; without this it fails with
+  # "Resource not accessible by integration" on a private repository.
+  actions: read
+
+jobs:
+  analyze:
+    name: Analyse C
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: c-cpp
+          build-mode: manual
+          config-file: ./.github/codeql/codeql-config.yml
+      - name: Build
+        env:
+          CC: gcc
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build --parallel --target rmlines rmdump build_tests
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: c
+          upload: never
+          output: sarif-results
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: codeql-sarif
+          path: sarif-results
+      - name: Fail on findings
+        run: |
+          results=$(jq -r '.runs[].results[]
+            | "\(.level // "warning")\t\(.ruleId)\t\(.locations[0].physicalLocation.artifactLocation.uri // "-"):\(.locations[0].physicalLocation.region.startLine // 0)\t\(.message.text | split("\n")[0])"' \
+            sarif-results/*.sarif)
+          if [ -n "$results" ]; then echo "$results"; fi
+          blocking=$(echo "$results" | awk -F'\t' '$1 == "error" || $1 == "warning"' | grep -c . || true)
+          echo "CodeQL: $(echo "$results" | grep -c . || true) results, $blocking of level error or warning"
+          test "$blocking" -eq 0
