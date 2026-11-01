@@ -185,6 +185,37 @@ static void a_tombstone_before_a_108_byte_block_is_a_tombstone(void) {
     }
 }
 
+/* A deleted length removes a highlight even with a value behind it, the way
+ * the editor reads it: the page does not show what the editor cannot erase,
+ * and the removal is no loss. */
+static void a_deleted_highlight_with_a_value_is_not_shown(void) {
+    uint8_t rectangles[6 + 32] = { 0x6C, 33, 0, 0, 0, 1 };
+    rm_buf value = { 0 }, body = { 0 }, page;
+    const uint8_t head[] = { 0x01, 0x44, 3, 0, 0, 0 };
+    rm_buf_append(&value, head, sizeof head);
+    rm_buf_append(&value, rectangles, sizeof rectangles);
+    append_raw_preamble(&body, 20, 1);
+    rm_write_block(&body, 6, value.bytes, value.count);
+    start_page(&page);
+    append_block(&page, 0x03, 1, 1, body.bytes, body.count);
+    rm_page *parsed = parse(page.bytes, page.count);
+    RM_CHECK(parsed != nullptr, "the page parses");
+    if (parsed != nullptr) {
+        RM_CHECK_EQ_SIZE(parsed->highlight_count, 0, "the deleted highlight is not shown");
+        RM_CHECK_EQ_SIZE(parsed->skipped_blocks, 0, "and is no loss");
+        rm_page_free(parsed);
+    }
+    rm_item_id *ids = nullptr;
+    size_t id_count = 0;
+    RM_CHECK(rm_highlighter_items(page.bytes, page.count, &ids, &id_count, nullptr) == RM_OK &&
+                 id_count == 0,
+             "nor listed as a mark to erase");
+    rm_item_ids_free(ids);
+    rm_buf_free(&value);
+    rm_buf_free(&body);
+    rm_buf_free(&page);
+}
+
 /* A value that ends before its optional colour: the byte behind it is the
  * next block's length, and 420 spells the colour's tag, A4 01. */
 static void a_highlight_takes_no_colour_from_the_block_after_it(void) {
@@ -765,6 +796,7 @@ static void highlights_over_a_text_layer_are_found_with_the_strokes(void) {
 int main(void) {
     a_tombstone_before_a_108_byte_block_is_a_tombstone();
     a_highlight_takes_no_colour_from_the_block_after_it();
+    a_deleted_highlight_with_a_value_is_not_shown();
     a_highlight_whose_rectangles_run_past_its_value_is_a_counted_loss();
     a_highlight_with_neither_value_nor_deletion_is_a_counted_loss();
     a_highlight_whose_value_will_not_read_is_a_counted_loss();
