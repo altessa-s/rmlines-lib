@@ -219,7 +219,15 @@ inside somebody's application, in a task nothing interrupts; a page built to be 
 - **[rmlines-swift](https://github.com/altessa-s/rmlines-swift)** — the same format as a Swift package for macOS and iOS, with an `RMLines.xcframework`
   for binary consumers.
 
+## Acknowledgements
+
+The `.rm` format is not published by reMarkable. This library is built on openly available information and on the research of third-party
+developers who documented the format, among them [rmscene](https://github.com/ricklupton/rmscene) and
+[remarkable_rust](https://github.com/hiteshjoshi/remarkable_rust).
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE). The sample corpus under `tests/fixtures/v6-samples/` comes from
 [remarkable_rust](https://github.com/hiteshjoshi/remarkable_rust) and carries its own licence beside it.
+
+reMarkable is a trademark of reMarkable AS. This project is not affiliated with, endorsed by or sponsored by reMarkable AS.
