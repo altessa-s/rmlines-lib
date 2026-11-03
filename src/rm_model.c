@@ -181,6 +181,7 @@ int rm_paragraph_format_level(const rm_paragraph_format* format) {
 constexpr uint32_t TICKED_BIT = 0x100u;
 constexpr uint32_t TICKED_NESTED_BIT = 0x200u;
 
+/* Whether the paragraph's style belongs to the checkbox family of lists. */
 static bool is_checkbox(const rm_paragraph_format* format) {
   return rm_paragraph_style_list_family(rm_paragraph_format_style(format)) ==
          RM_LIST_CHECKBOX;

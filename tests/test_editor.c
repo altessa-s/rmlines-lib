@@ -28,6 +28,7 @@ static const char* const SAMPLES[] = {
     "With_SceneInfo_Block.rm",
     "test-crdt-ordering.rm",
 };
+
 constexpr size_t SAMPLE_COUNT = sizeof SAMPLES / sizeof *SAMPLES;
 
 static uint8_t* sample(const char* name, size_t* out_size) {

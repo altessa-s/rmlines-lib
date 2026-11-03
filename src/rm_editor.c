@@ -14,6 +14,8 @@
 #include "rmlines/parser.h"
 #include "rmlines/writer.h"
 
+/* Fill in `*out_error`, when the caller asked for one, with the status, the
+ * numeric value and an optional message. */
 static void fail_with(rm_error* out_error, rm_status status, long value,
                       const char* message) {
   if (out_error == nullptr) return;

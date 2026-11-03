@@ -262,6 +262,8 @@ typedef enum rm_list_family : int32_t {
   RM_LIST_NUMBERED = 2,
 } rm_list_family;
 
+/* Which family of list the style belongs to, or RM_LIST_NONE when it is not
+ * one of a list. */
 RM_API rm_list_family rm_paragraph_style_list_family(rm_paragraph_style style);
 /* Whether the paragraph is one of a list: those get a marker drawn in front
  * of them and their text moved out of its way. */
@@ -451,6 +453,7 @@ typedef struct rm_item_id {
   uint64_t counter;
 } rm_item_id;
 
+/* Whether the two identifiers name the same item. */
 RM_API bool rm_item_id_equal(rm_item_id a, rm_item_id b);
 /* The `author:counter` spelling, NUL-terminated. Answers how many characters
  * the whole spelling takes, as `snprintf` does; 25 bytes always suffice — 24

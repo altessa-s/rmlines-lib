@@ -41,16 +41,28 @@
  * under the page. */
 typedef struct rm_arena rm_arena;
 
+/* A fresh, empty arena, or null on allocation failure. */
 rm_arena* rm_arena_create(void);
+
+/* Free an arena and everything allocated from it. Null is accepted and
+ * ignored. */
 void rm_arena_destroy(rm_arena* arena);
+
 /* Aligned to `max_align_t`, zeroed nowhere: callers that need zeroes ask. */
 void* rm_arena_alloc(rm_arena* arena, size_t size);
+
+/* Like `rm_arena_alloc`, zeroed, and null without allocating on an overflow of
+ * `count * size`. */
 void* rm_arena_calloc(rm_arena* arena, size_t count, size_t size);
+
 #ifdef RMLINES_TESTING
 /* Fail one arena allocation after this many successes; SIZE_MAX disables it. */
 void rm_test_arena_fail_after(size_t count);
+
+/* Whether the counted allocation has failed since the last `_fail_after`. */
 bool rm_test_arena_did_fail(void);
 #endif
+
 /* A copy of `length` bytes with a NUL behind them, so the result reaches
  * `printf` unchanged. */
 char* rm_arena_strndup(rm_arena* arena, const char* bytes, size_t length);
@@ -70,11 +82,20 @@ typedef struct rm_vec {
   size_t elem;
 } rm_vec;
 
+/* Ready an empty vector of elements `elem_size` bytes wide. */
 void rm_vec_init(rm_vec* vec, size_t elem_size);
+
+/* Release the backing storage and leave the vector empty. */
 void rm_vec_free(rm_vec* vec);
+
 /* False on allocation failure, and then the vector is untouched. */
 [[nodiscard]] bool rm_vec_push(rm_vec* vec, const void* element);
+
+/* Grow the backing storage to hold at least `capacity` elements. False and
+ * the vector untouched on allocation failure. */
 [[nodiscard]] bool rm_vec_reserve(rm_vec* vec, size_t capacity);
+
+/* The element at `index`, unchecked. */
 void* rm_vec_at(const rm_vec* vec, size_t index);
 
 /* A growable byte buffer: what the writer builds a block in. */
@@ -88,10 +109,18 @@ typedef struct rm_buf {
   bool failed;
 } rm_buf;
 
+/* Ready an empty buffer. */
 void rm_buf_init(rm_buf* buf);
+
+/* Release the backing storage and leave the buffer empty. */
 void rm_buf_free(rm_buf* buf);
+
+/* Append `length` bytes, or mark the buffer failed on allocation failure. */
 void rm_buf_append(rm_buf* buf, const void* bytes, size_t length);
+
+/* Append one byte, or mark the buffer failed on allocation failure. */
 void rm_buf_append_byte(rm_buf* buf, uint8_t byte);
+
 /* Hand the bytes over to the caller and leave the buffer empty. Null when the
  * buffer had failed. */
 uint8_t* rm_buf_take(rm_buf* buf, size_t* out_size);
@@ -113,6 +142,7 @@ size_t rm_utf8_scalar_count(const char* bytes, size_t length);
  *
  * `out` must hold at least `rm_utf8_repair_bound(length)` bytes. */
 size_t rm_utf8_repair(const char* bytes, size_t length, char* out);
+
 /* Three bytes out for every byte in is the worst case: a run of continuation
  * bytes is one U+FFFD each. */
 size_t rm_utf8_repair_bound(size_t length);
@@ -132,8 +162,10 @@ typedef struct rm_crdt_id {
   uint8_t author;
 } rm_crdt_id;
 
+/* Whether the two identifiers name the same record. */
 bool rm_crdt_equal(rm_crdt_id a, rm_crdt_id b);
 
+/* An identifier out of its two parts. */
 rm_crdt_id rm_crdt_make(uint8_t author, uint64_t counter);
 
 constexpr rm_crdt_id RM_CRDT_NONE = {.counter = 0, .author = 0};
@@ -151,14 +183,26 @@ typedef struct rm_idmap {
   size_t count;
 } rm_idmap;
 
+/* Ready an empty map. */
 void rm_idmap_init(rm_idmap* map);
+
+/* Release the backing storage and leave the map empty. */
 void rm_idmap_free(rm_idmap* map);
+
+/* Set or replace the value under `key`. False on allocation failure, and
+ * then the map is untouched. */
 [[nodiscard]] bool rm_idmap_set(rm_idmap* map, rm_crdt_id key, uint64_t value);
+
+/* The value under `key`, or false when there is none. */
 bool rm_idmap_get(const rm_idmap* map, rm_crdt_id key, uint64_t* out_value);
+
+/* Whether `key` is in the map. */
 bool rm_idmap_contains(const rm_idmap* map, rm_crdt_id key);
+
 /* Take the entry out and answer what it held. Used, among other things, to
  * mark a bucket spent. */
 bool rm_idmap_take(rm_idmap* map, rm_crdt_id key, uint64_t* out_value);
+
 /* Walk every entry. `*cursor` starts at 0 and is opaque. */
 bool rm_idmap_next(const rm_idmap* map, size_t* cursor, rm_crdt_id* out_key,
                    uint64_t* out_value);
@@ -176,10 +220,18 @@ typedef struct rm_keymap {
   size_t count;
 } rm_keymap;
 
+/* Ready an empty map. */
 void rm_keymap_init(rm_keymap* map);
+
+/* Release the backing storage and leave the map empty. */
 void rm_keymap_free(rm_keymap* map);
+
+/* Set or replace the value under `key`. False on allocation failure, and
+ * then the map is untouched. */
 [[nodiscard]] bool rm_keymap_set(rm_keymap* map, const uint8_t key[16],
                                  uint64_t value);
+
+/* The value under `key`, or false when there is none. */
 bool rm_keymap_get(const rm_keymap* map, const uint8_t key[16],
                    uint64_t* out_value);
 
@@ -208,10 +260,14 @@ typedef struct rm_grouping {
                                      rm_crdt_id (*key_of)(size_t index,
                                                           void* ctx),
                                      void* ctx);
+
+/* Release the grouping and everything built for it. */
 void rm_grouping_free(rm_grouping* grouping);
+
 /* The run of items in the group named by `key`, or false when there is none. */
 bool rm_grouping_find(const rm_grouping* grouping, rm_crdt_id key,
                       const uint32_t** out_items, size_t* out_count);
+
 /* The group's number, for the callers that keep a cursor or a spent flag per
  * group rather than per key. */
 bool rm_grouping_number(const rm_grouping* grouping, rm_crdt_id key,
@@ -243,7 +299,10 @@ typedef struct rm_reader {
   size_t offset;
 } rm_reader;
 
+/* Ready a reader positioned at the start of `data`. */
 void rm_reader_init(rm_reader* reader, const uint8_t* data, size_t size);
+
+/* How many bytes stand between the position and the reader's own end. */
 size_t rm_reader_remaining(const rm_reader* reader);
 
 /* Where `length` bytes starting at the position end, when they fit inside
@@ -258,15 +317,29 @@ size_t rm_reader_remaining(const rm_reader* reader);
 bool rm_fits_within(const rm_reader* reader, size_t length, size_t limit,
                     size_t* out_end);
 
+/* Move the position to `position`. RM_ERR_UNEXPECTED_EOF when it lies past
+ * the reader's own end. */
 [[nodiscard]] rm_status rm_read_seek(rm_reader* reader, size_t position);
+
+/* One byte. */
 [[nodiscard]] rm_status rm_read_u8(rm_reader* reader, uint8_t* out);
+
+/* Two little-endian bytes. */
 [[nodiscard]] rm_status rm_read_u16(rm_reader* reader, uint16_t* out);
+
+/* Four little-endian bytes. */
 [[nodiscard]] rm_status rm_read_u32(rm_reader* reader, uint32_t* out);
+
+/* Four little-endian bytes, as the float32 they are the bit pattern of. */
 [[nodiscard]] rm_status rm_read_f32(rm_reader* reader, float* out);
+
+/* Eight little-endian bytes, as the float64 they are the bit pattern of. */
 [[nodiscard]] rm_status rm_read_f64(rm_reader* reader, double* out);
+
 /* `out` points into the source bytes and lives as long as they do. */
 [[nodiscard]] rm_status rm_read_bytes(rm_reader* reader, size_t length,
                                       const uint8_t** out);
+
 /* Read a length4 body after its tag. The child cannot read past that body;
  * the parent advances to its end, including any padding the child ignores. */
 [[nodiscard]] rm_status rm_read_subblock(rm_reader* reader, rm_reader* out);
@@ -294,6 +367,7 @@ typedef struct rm_block_header {
  * come". A number too wide for 64 bits is refused rather than quietly
  * rewritten into a different one. */
 [[nodiscard]] rm_status rm_read_varuint(rm_reader* reader, uint64_t* out);
+
 /* A count the file declares, as a `size_t`. A varuint is 64 bits wide and a
  * count is an index into memory; a value above what the machine can address
  * is an error rather than a wrap. */
@@ -303,12 +377,15 @@ typedef struct rm_block_header {
  * value type. */
 [[nodiscard]] rm_status rm_read_tag(rm_reader* reader, uint32_t* out_index,
                                     uint8_t* out_type);
+
 /* Check that the expected tag comes next without moving the position on a
  * mismatch: the format has optional fields.
  *
  * A question, not a read: a tag that is not there, and bytes that are not a
  * tag at all, are both answered false with the position restored. */
 bool rm_match_tag(rm_reader* reader, uint32_t index, uint8_t type);
+
+/* Like `rm_match_tag`, but RM_ERR_MALFORMED_PAGE instead of false. */
 [[nodiscard]] rm_status rm_expect_tag(rm_reader* reader, uint32_t index,
                                       uint8_t type);
 
@@ -317,7 +394,10 @@ bool rm_match_tag(rm_reader* reader, uint32_t index, uint8_t type);
  * out of place. */
 [[nodiscard]] rm_status rm_read_crdt(rm_reader* reader, uint32_t index,
                                      rm_crdt_id* out);
+
+/* Like `rm_read_crdt`, the value thrown away. */
 [[nodiscard]] rm_status rm_skip_crdt(rm_reader* reader, uint32_t index);
+
 /* An identifier written with no tag in front of it. The list of paragraph
  * styles is keyed that way: the key stands bare, and only the fields after it
  * carry tags. */
@@ -349,17 +429,34 @@ bool rm_match_tag(rm_reader* reader, uint32_t index, uint8_t type);
 /* An identifier as the writer hands one out. */
 typedef rm_crdt_id rm_wid;
 
+/* Two bytes, little-endian. */
 void rm_write_u16(rm_buf* buf, uint16_t value);
+
+/* Four bytes, little-endian. */
 void rm_write_u32(rm_buf* buf, uint32_t value);
+
+/* The float32's bit pattern, little-endian. */
 void rm_write_f32(rm_buf* buf, float value);
+
+/* The float64's bit pattern, little-endian. */
 void rm_write_f64(rm_buf* buf, double value);
+
+/* A varuint: 7 bits per byte, the top bit saying "more to come". */
 void rm_write_varuint(rm_buf* buf, uint64_t value);
+
+/* A tag: the field index in the upper bits, the value type in the lower. */
 void rm_write_tag(rm_buf* buf, uint32_t index, uint8_t type);
+
+/* A tagged identifier: the tag, then the author and counter. */
 void rm_write_id(rm_buf* buf, uint32_t index, rm_wid value);
+
+/* An identifier with no tag in front of it: the author, then the counter. */
 void rm_write_bare_id(rm_buf* buf, rm_wid value);
+
 /* A string as the format spells one: the length in bytes, the encoding
  * marker, then the bytes. */
 void rm_write_string(rm_buf* buf, const char* text);
+
 /* A tagged subblock: the tag, the length of what follows, and the bytes. */
 void rm_write_block(rm_buf* buf, uint32_t index, const uint8_t* body,
                     size_t length);
@@ -371,8 +468,10 @@ void rm_write_block(rm_buf* buf, uint32_t index, const uint8_t* body,
  * the stamp would be the field easiest to leave at the wrong id. */
 void rm_write_stamped_u8(rm_buf* buf, uint32_t index, rm_wid stamp,
                          uint8_t value);
+
 void rm_write_stamped_f32(rm_buf* buf, uint32_t index, rm_wid stamp,
                           float value);
+
 void rm_write_stamped_block(rm_buf* buf, uint32_t index, rm_wid stamp,
                             const uint8_t* body, size_t length);
 
@@ -392,8 +491,10 @@ void rm_write_top_block(rm_buf* file, uint8_t type, uint8_t min_version,
 constexpr uint8_t RM_BLOCK_SCENE_LINE_ITEM = 0x05;
 constexpr uint8_t RM_BLOCK_SCENE_GLYPH_ITEM = 0x03;
 
+/* The public spelling of an internal identifier. */
 rm_item_id rm_item_id_of(rm_crdt_id id);
 
+/* The internal spelling of a public identifier. */
 rm_crdt_id rm_crdt_of(rm_item_id id);
 
 /* The envelope every scene item starts with: the parent node, the item's own
@@ -406,6 +507,7 @@ typedef struct rm_item_preamble {
   uint32_t deleted;
 } rm_item_preamble;
 
+/* Read one item's preamble. */
 [[nodiscard]] rm_status rm_parse_item_preamble(rm_reader* reader,
                                                rm_item_preamble* out);
 
@@ -424,6 +526,7 @@ typedef struct rm_item_preamble {
 /* The message is built only when a sink is installed, which is what makes a
  * debug line on a hot parsing path free. */
 bool rm_log_wanted(void);
+
 /* `format(printf, ...)` is a GNU spelling. MSVC has no `__attribute__` at all
  * — unguarded it is a syntax error, not a warning — and the library declares
  * Windows a target in `export.h` and in the build. */
@@ -434,6 +537,9 @@ bool rm_log_wanted(void);
 #define RM_PRINTF(format_index, first_argument)
 #endif
 
+/* Format a line and hand it to the installed sink. A no-op when none is
+ * installed — callers guard with `rm_log_wanted` so the formatting itself is
+ * skipped on the common path. */
 void rm_log_writef(rm_log_level level, const char* format, ...) RM_PRINTF(2, 3);
 
 #define RM_LOG_ERRORF(...)                                         \

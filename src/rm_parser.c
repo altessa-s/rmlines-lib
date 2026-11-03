@@ -27,9 +27,11 @@
 
 /* The value type inside a stroke block (`RM_BLOCK_SCENE_LINE_ITEM`). */
 constexpr uint8_t VALUE_LINE_ITEM = 0x03;
+
 /* A scene tree node and the root text block. */
 constexpr uint8_t BLOCK_TREE_NODE = 0x02;
 constexpr uint8_t BLOCK_ROOT_TEXT = 0x07;
+
 /* The tree itself, the order of a node's children, and the tombstones an undo
  * leaves. The three carry the layers: 0x01 says which nodes exist, 0x04 links
  * a child group into its parent's list, and 0x08 is a position-holding
@@ -38,6 +40,7 @@ constexpr uint8_t BLOCK_SCENE_TREE = 0x01;
 constexpr uint8_t BLOCK_SCENE_GROUP_ITEM = 0x04;
 constexpr uint8_t BLOCK_UNDO_TOMBSTONE = 0x08;
 constexpr uint8_t VALUE_GROUP_ITEM = 0x02;
+
 /* The attachments: 0x0E maps a 16-byte key to a file name in the document's
  * index, 0x0F places the image on the page by four vertices. */
 constexpr uint8_t BLOCK_ATTACHMENT_MAP = 0x0E;
@@ -60,23 +63,29 @@ constexpr uint8_t BLOCK_PAGE_INFO = 0x0A;
 constexpr uint32_t TAG_BACKGROUND_VISIBLE = 2;
 constexpr uint32_t TAG_ROOT_DOCUMENT_VISIBLE = 3;
 constexpr uint32_t TAG_PAPER_SIZE = 5;
+
 /* The same sheet as tag 5, unrounded — two float64. */
 constexpr uint32_t TAG_CANVAS_SIZE = 7;
+
 /* Field indexes of a tree node: the visibility, the anchor, and the
  * horizontal the anchored handwriting counts its x from. */
 constexpr uint32_t TAG_VISIBILITY = 3;
 constexpr uint32_t TAG_ANCHOR = 7;
 constexpr uint32_t TAG_ANCHOR_ORIGIN = 10;
+
 /* Fields of the root text block. */
 constexpr uint32_t TAG_TEXT_ITEMS = 2;
 constexpr uint32_t TAG_TEXT_POSITION = 3;
+
 /* The width of the text column, declared outright. `byte4` by its tag and a
  * **float32** by its contents: 0x44900000 is 1152.0, and read as a uint32 the
  * same bytes are a billion and change. */
 constexpr uint32_t TAG_COLUMN_WIDTH = 4;
+
 /* The text's settings, whose `tag 1` is the same width once more, stamped —
  * the one that takes precedence. */
 constexpr uint32_t TAG_TEXT_SETTINGS = 5;
+
 /* The field a text record carries when it is not text at all but a marker: the
  * start or the end of a bold or an italic stretch or of a link, or an image in
  * the flow. */
@@ -86,6 +95,7 @@ constexpr uint32_t TAG_MARKER = 2;
 constexpr uint32_t MARK_LINK_START = 5;
 constexpr uint32_t MARK_LINK_END = 6;
 constexpr uint32_t MARK_INLINE_IMAGE = 0xFFFF'FFFFu;
+
 /* What stands in the text for an image in its flow — the character the
  * tablet's own layout puts there, U+FFFC, in UTF-8. */
 static const char OBJECT_REPLACEMENT[] = "\xEF\xBF\xBC";
@@ -303,6 +313,8 @@ rm_status rm_parse_item_preamble(rm_reader* reader, rm_item_preamble* out) {
   return rm_read_u32(reader, &out->deleted);
 }
 
+/* The preamble alone, as a tombstone: what a value-less or already-deleted
+ * record becomes. */
 static scene_item item_tombstone(const rm_item_preamble* preamble) {
   return (scene_item){
       .parent = preamble->parent,
@@ -317,6 +329,8 @@ static scene_item item_tombstone(const rm_item_preamble* preamble) {
 /* Strokes                                                             */
 /* ------------------------------------------------------------------ */
 
+/* How many bytes one point takes at this version: 0x18 for version one's
+ * five float32, 0x0E for version two's packed layout. */
 static rm_status point_size(uint8_t version, size_t* out) {
   switch (version) {
     case 1:
@@ -393,6 +407,8 @@ static rm_status parse_point(rm_reader* reader, uint8_t version,
   return RM_OK;
 }
 
+/* The tool the file's raw number names, or RM_TOOL_UNKNOWN for a number
+ * this library has not seen. */
 static rm_pen_tool tool_of(uint32_t raw) {
   switch (raw) {
     case 0:
@@ -419,6 +435,8 @@ static rm_pen_tool tool_of(uint32_t raw) {
   }
 }
 
+/* The palette index the file's raw number names, or `fallback` when it is
+ * past the end of the palette. */
 static rm_pen_color color_of(uint32_t raw, rm_pen_color fallback) {
   return raw <= (uint32_t)RM_COLOR_HIGHLIGHTER_ORANGE ? (rm_pen_color)raw
                                                       : fallback;
@@ -624,6 +642,9 @@ typedef struct tree_node {
   rm_crdt_id visibility_stamp;
 } tree_node;
 
+/* One scene tree node's own identifier, anchor and visibility, read field by
+ * field so that a field of an unknown shape ends the node rather than the
+ * block. */
 static rm_status parse_tree_node(rm_reader* reader, size_t end,
                                  tree_node* out) {
   *out = (tree_node){0};
@@ -870,6 +891,8 @@ static void skip_optional_tail(rm_reader* reader, uint32_t index,
   if (!skipped) reader->offset = saved;
 }
 
+/* One highlight record (0x03): the preamble, then its value — the fuller
+ * contract is documented above `skip_optional_tail`. */
 static rm_status parse_glyph_item(parse_ctx* ctx, rm_reader* reader, size_t end,
                                   bool* out_found, rm_highlight* out) {
   *out_found = false;
@@ -1433,10 +1456,12 @@ typedef struct text_key_ctx {
   const text_item* items;
 } text_key_ctx;
 
+/* The grouping key for a text record: the identifier its `left` names. */
 static rm_crdt_id text_left_key(size_t index, void* ctx) {
   return ((text_key_ctx*)ctx)->items[index].left;
 }
 
+/* The grouping key for a position in a tie: the record's `right`. */
 static rm_crdt_id text_right_key(size_t position, void* ctx) {
   /* Keyed over the positions of one tie, so the context carries the bucket
    * as well as the items. */
@@ -1658,10 +1683,13 @@ done:
 /* Composing the lines                                                 */
 /* ------------------------------------------------------------------ */
 
+/* A paragraph and an offset into one `uint64_t`, the value `place_of_character`
+ * maps an identifier to. */
 static uint64_t anchor_pack(int32_t paragraph, int32_t offset) {
   return (uint64_t)(uint32_t)paragraph << 32 | (uint64_t)(uint32_t)offset;
 }
 
+/* The paragraph and offset `anchor_pack` packed into `packed`. */
 static rm_text_anchor anchor_unpack(uint64_t packed) {
   return (rm_text_anchor){
       .paragraph = (int32_t)(uint32_t)(packed >> 32),
@@ -1669,6 +1697,8 @@ static rm_text_anchor anchor_unpack(uint64_t packed) {
   };
 }
 
+/* Start a fresh, empty paragraph at the end of the layout. False on
+ * allocation failure. */
 static bool layout_push_line(text_layout* layout) {
   line_build line;
   rm_buf_init(&line.text);
@@ -1676,6 +1706,7 @@ static bool layout_push_line(text_layout* layout) {
   return rm_vec_push(&layout->lines, &line);
 }
 
+/* Release every paragraph's text and faces, and the layout's own tables. */
 static void layout_free(text_layout* layout) {
   for (size_t i = 0; i < layout->lines.count; i += 1) {
     line_build* line = rm_vec_at(&layout->lines, i);
@@ -2080,10 +2111,12 @@ typedef struct scene_key_ctx {
   const uint32_t* positions;
 } scene_key_ctx;
 
+/* The grouping key for a scene item: the node it hangs on. */
 static rm_crdt_id scene_parent_key(size_t index, void* ctx) {
   return ((scene_key_ctx*)ctx)->items[index].parent;
 }
 
+/* The grouping key for a position among a node's children: its `left`. */
 static rm_crdt_id scene_left_key(size_t position, void* ctx) {
   scene_key_ctx* state = ctx;
   return state->items[state->positions[position]].left;
@@ -2246,6 +2279,9 @@ static void claim_subtree(scene_walk* walk, rm_crdt_id node) {
   rm_vec_free(&stack);
 }
 
+/* The node's children (there may be none), ordered the way `chain_order`
+ * orders them. Malloc'd; the caller frees it. Null only on allocation
+ * failure. */
 static uint32_t* children_in_chain_order(const scene_walk* walk,
                                          rm_crdt_id node, size_t* out_count) {
   const uint32_t* children;
@@ -2468,6 +2504,8 @@ static bool anchor_under(const parse_ctx* ctx, rm_crdt_id parent,
   return true;
 }
 
+/* The file name the attachment map gave `key`, or null when the map does
+ * not know it. */
 static const rm_str* attachment_name(const parse_ctx* ctx, const uint8_t* key) {
   uint64_t at;
   if (!rm_keymap_get(&ctx->attachment_index, key, &at)) return nullptr;
@@ -2544,6 +2582,8 @@ static void apply_styles(const parse_ctx* ctx, rm_paragraph* paragraphs,
   }
 }
 
+/* The page's `rm_text_block`: one `rm_paragraph` per laid-out line, its text
+ * copied into the page's arena and its style and faces attached. */
 static rm_status build_text_block(parse_ctx* ctx, rm_text_block* out) {
   size_t count = ctx->text.lines.count;
   rm_paragraph* paragraphs =
@@ -2701,6 +2741,8 @@ done:
 /* The door                                                            */
 /* ------------------------------------------------------------------ */
 
+/* Release everything gathered into the context except its arena, which the
+ * page built from it still owns. */
 static void ctx_free(parse_ctx* ctx) {
   rm_vec_free(&ctx->items);
   rm_vec_free(&ctx->tree_events);
@@ -2715,6 +2757,8 @@ static void ctx_free(parse_ctx* ctx) {
   if (ctx->has_text) layout_free(&ctx->text);
 }
 
+/* Fill in `*out_error`, when the caller asked for one, with the status, the
+ * version and an optional message. */
 static void fail_with(rm_error* out_error, rm_status status, int version,
                       const char* message) {
   if (out_error == nullptr) return;
@@ -2724,6 +2768,8 @@ static void fail_with(rm_error* out_error, rm_status status, int version,
   }
 }
 
+/* Fold one node's visibility record into the running tables, newer stamp
+ * winning over older. */
 static rm_status apply_visibility(parse_ctx* ctx, const tree_node* node) {
   if (!node->has_visible) return RM_OK;
   uint64_t index;
@@ -2751,6 +2797,9 @@ static rm_status apply_visibility(parse_ctx* ctx, const tree_node* node) {
   return RM_OK;
 }
 
+/* Every top-level block of the page, dispatched by type and gathered into
+ * `ctx`. An out-of-memory failure stops the parse; any other block failure
+ * is counted and the parse moves on to the next block. */
 static rm_status parse_blocks(parse_ctx* ctx) {
   rm_reader* reader = &ctx->reader;
 
@@ -3069,6 +3118,8 @@ typedef struct group_key_ctx {
   const uint32_t* groups;
 } group_key_ctx;
 
+/* The grouping key for a group item, by its position in `groups`: the node
+ * it hangs on. */
 static rm_crdt_id group_parent_key(size_t position, void* ctx) {
   group_key_ctx* state = ctx;
   return state->items[state->groups[position]].parent;

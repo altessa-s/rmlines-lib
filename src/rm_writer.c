@@ -28,6 +28,7 @@
  * apart: reuse a number and the page claims two edits are the same edit. */
 
 constexpr uint8_t DRAFT_AUTHOR = 1;
+
 /* The second author index a tablet page keeps for its formatting edits: its
  * marks all carry it, and its entry stands first in the authors table. */
 constexpr uint8_t DRAFT_MARKS_AUTHOR = 2;
@@ -45,13 +46,16 @@ constexpr rm_wid ID_WIDTH_STAMP = {.counter = 15, .author = DRAFT_AUTHOR};
 
 /* Where the characters of the text start counting. */
 constexpr uint64_t FIRST_CHARACTER = 20;
+
 /* Where the anchored groups and their strokes start counting. Far above the
  * text: the characters take one counter each, and a page can run to thousands
  * of them. */
 constexpr uint64_t FIRST_MARK = 100000;
+
 /* And where the strokes that hang on nothing start — above the marks, which
  * take eight counters each. */
 constexpr uint64_t FIRST_LOOSE_STROKE = 200000;
+
 /* Where the placed images start — above everything else. Each is given
  * sixteen counters' worth of room and spends eight of them. */
 constexpr uint64_t FIRST_IMAGE = 300000;
@@ -64,8 +68,10 @@ constexpr uint64_t IMAGE_STRIDE = 16;
  * counter. */
 constexpr size_t MARK_LIMIT =
     (size_t)((FIRST_LOOSE_STROKE - FIRST_MARK) / MARK_STRIDE);
+
 constexpr size_t LOOSE_STROKE_LIMIT =
     (size_t)(FIRST_IMAGE - FIRST_LOOSE_STROKE);
+
 /* The room the characters have before the marks begin — every scalar takes
  * one, and an empty paragraph still takes one for its newline. */
 constexpr size_t CHARACTER_LIMIT = (size_t)(FIRST_MARK - FIRST_CHARACTER);
@@ -75,8 +81,10 @@ constexpr size_t CHARACTER_LIMIT = (size_t)(FIRST_MARK - FIRST_CHARACTER);
  * given away for nothing. */
 static_assert(FIRST_MARK + MARK_LIMIT * MARK_STRIDE == FIRST_LOOSE_STROKE,
               "the marks must end where the loose strokes begin");
+
 static_assert(FIRST_LOOSE_STROKE + LOOSE_STROKE_LIMIT == FIRST_IMAGE,
               "the loose strokes must end where the images begin");
+
 static_assert(FIRST_CHARACTER + CHARACTER_LIMIT == FIRST_MARK,
               "the characters must end where the marks begin");
 
@@ -84,6 +92,7 @@ static_assert(FIRST_CHARACTER + CHARACTER_LIMIT == FIRST_MARK,
  * it reads, 35.748031 is what it writes. */
 constexpr float LINE_ANCHOR_THRESHOLD = 35.748031f;
 
+/* An identifier out of its two parts, for the counters this file hands out. */
 static rm_wid wid(uint8_t author, uint64_t counter) {
   return (rm_wid){.counter = counter, .author = author};
 }
@@ -108,6 +117,8 @@ typedef struct mark_ids {
   rm_wid anchor, type, threshold, origin;
 } mark_ids;
 
+/* The identifiers of the mark numbered `number`, its range's base plus the
+ * fixed offsets `mark_ids` lists. */
 static mark_ids mark_ids_of(size_t number) {
   uint64_t base = FIRST_MARK + (uint64_t)number * MARK_STRIDE;
   return (mark_ids){
@@ -133,6 +144,8 @@ typedef struct image_ids {
   rm_wid node, group_item, anchor, type, threshold;
 } image_ids;
 
+/* The identifiers of the image numbered `number`, its range's base plus the
+ * fixed offsets `image_ids` lists. */
 static image_ids image_ids_of(size_t number) {
   uint64_t base = FIRST_IMAGE + (uint64_t)number * IMAGE_STRIDE;
   return (image_ids){
@@ -188,6 +201,7 @@ rm_draft_stroke rm_draft_stroke_make(rm_pen_tool tool, rm_pen_color color,
                            .point_count = point_count};
 }
 
+/* How many Unicode scalars `text` holds, nought for a null string. */
 static size_t scalar_count(const char* text) {
   if (text == nullptr) return 0;
   return rm_utf8_scalar_count(text, strlen(text));
@@ -319,6 +333,8 @@ typedef struct anchor_spec {
   float threshold;
 } anchor_spec;
 
+/* The identifier and the type/threshold pair that spell `anchor` the way the
+ * tablet does. False when the anchor names a paragraph the text has not got. */
 static bool anchor_spec_of(rm_draft_anchor anchor, const rm_wid* characters,
                            size_t count, anchor_spec* out) {
   switch (anchor.kind) {
@@ -728,6 +744,8 @@ typedef struct text_writer {
   uint64_t mark_counter;
 } text_writer;
 
+/* One text record: `raw` repaired to well-formed UTF-8, chained onto the
+ * record before it, and the chain tail and counters advanced past it. */
 static void append_record(text_writer* state, const char* raw) {
   char* text = well_formed(raw);
   if (text == nullptr) {
@@ -801,6 +819,9 @@ typedef struct text_block_result {
   rm_wid* first_characters;
 } text_block_result;
 
+/* The `0x07` RootText block's payload, built from the draft's paragraphs:
+ * the text and style records, and the box they are set in. False on
+ * allocation failure, with `*out` left unset. */
 static bool text_block(const rm_draft_paragraph* paragraphs, size_t count,
                        const rm_draft_column* column, text_block_result* out) {
   text_writer state = {
@@ -969,6 +990,8 @@ static bool text_block(const rm_draft_paragraph* paragraphs, size_t count,
 /* The door                                                            */
 /* ------------------------------------------------------------------ */
 
+/* Fill in `*out_error`, when the caller asked for one, with the status, the
+ * numeric value and an optional message. */
 static void write_fail(rm_error* out_error, rm_status status, long value,
                        const char* message) {
   if (out_error == nullptr) return;
@@ -1006,6 +1029,8 @@ static rm_status check_arrays_are_there(const rm_page_draft* draft,
   return RM_OK;
 }
 
+/* The same check as `check_arrays_are_there`, one level down: a stroke or a
+ * mark's stroke whose point count is not nought has to carry the points. */
 static rm_status check_point_arrays(const rm_page_draft* draft,
                                     rm_error* out_error) {
   for (size_t i = 0; i < draft->stroke_count; i += 1) {

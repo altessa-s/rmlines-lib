@@ -157,6 +157,8 @@ void rm_buf_free(rm_buf* buf) {
   *buf = (rm_buf){0};
 }
 
+/* Make room for `extra` more bytes, growing the capacity by doubling. False,
+ * and the buffer marked failed, when the growth cannot be satisfied. */
 static bool rm_buf_grow(rm_buf* buf, size_t extra) {
   if (buf->failed) return false;
   if (buf->capacity - buf->count >= extra) return true;
@@ -368,6 +370,8 @@ static uint64_t rm_idmap_hash(rm_crdt_id key) {
   return x;
 }
 
+/* The slot `key` occupies, or the empty slot it would go in. Null only when
+ * the map has no slots at all. */
 static rm_idmap_slot* rm_idmap_find(const rm_idmap* map, rm_crdt_id key) {
   if (map->capacity == 0) return nullptr;
   size_t mask = map->capacity - 1u;
@@ -380,6 +384,8 @@ static rm_idmap_slot* rm_idmap_find(const rm_idmap* map, rm_crdt_id key) {
   }
 }
 
+/* Move every entry into a fresh table of `capacity` slots. False, and the
+ * map left as it was, on allocation failure. */
 static bool rm_idmap_rehash(rm_idmap* map, size_t capacity) {
   rm_idmap_slot* slots = calloc(capacity, sizeof *slots);
   if (slots == nullptr) return false;
@@ -500,6 +506,8 @@ static uint64_t rm_keymap_hash(const uint8_t key[16]) {
   return x;
 }
 
+/* The slot `key` occupies, or the empty slot it would go in. Null only when
+ * the map has no slots at all. */
 static rm_keymap_slot* rm_keymap_find(const rm_keymap* map,
                                       const uint8_t key[16]) {
   if (map->capacity == 0) return nullptr;
@@ -513,6 +521,8 @@ static rm_keymap_slot* rm_keymap_find(const rm_keymap* map,
   }
 }
 
+/* Move every entry into a fresh table of `capacity` slots. False, and the
+ * map left as it was, on allocation failure. */
 static bool rm_keymap_rehash(rm_keymap* map, size_t capacity) {
   rm_keymap_slot* slots = calloc(capacity, sizeof *slots);
   if (slots == nullptr) return false;

@@ -16,6 +16,8 @@
 
 #include "rmlines/rmlines.h"
 
+/* The command's help text, to stdout for `--help` and stderr for a usage
+ * error. */
 static void usage(FILE* to) {
   fprintf(to,
           "usage: rmdump [--json] [--quiet] <page.rm> [more.rm ...]\n"
@@ -26,12 +28,16 @@ static void usage(FILE* to) {
           "Reads reMarkable .rm v6 pages and prints what was parsed.\n");
 }
 
+/* The diagnostics sink installed unless `--quiet`: every line to stderr,
+ * tagged with its level. */
 static void sink(rm_log_level level, const char* message, void* context) {
   (void)context;
   fprintf(stderr, "[%s] %s\n", level == RM_LOG_ERROR ? "error" : "debug",
           message);
 }
 
+/* The tool's name as the dump spells it, "unknown" for a value this reader
+ * does not know. */
 static const char* tool_name(rm_pen_tool tool) {
   switch (tool) {
     case RM_TOOL_UNKNOWN:
@@ -107,6 +113,7 @@ static void print_escaped(FILE* to, rm_str text) {
   }
 }
 
+/* An anchor, in the indented text form shared by a stroke's and an image's. */
 static void print_anchor_text(const rm_text_anchor* anchor) {
   printf("paragraph=%" PRId32 " offset=%" PRId32, anchor->paragraph,
          anchor->offset);
@@ -116,6 +123,7 @@ static void print_anchor_text(const rm_text_anchor* anchor) {
     printf(" origin-x=-");
 }
 
+/* The whole of `page`, in the indented, human-readable text form. */
 static void dump_text(const rm_page* page, const char* name) {
   printf("page %s\n", name);
   printf("  skipped-blocks %zu\n", page->skipped_blocks);
@@ -245,6 +253,8 @@ static void dump_text(const rm_page* page, const char* name) {
   }
 }
 
+/* The whole of `page`, as one line of JSON, the same fields `dump_text`
+ * prints. */
 static void dump_json(const rm_page* page, const char* name) {
   printf("{\"name\":\"");
   print_escaped(stdout, (rm_str){.bytes = name, .length = strlen(name)});
@@ -384,6 +394,8 @@ static void dump_json(const rm_page* page, const char* name) {
   printf("]}}\n");
 }
 
+/* The whole of `path`, malloc'd; null on any failure to open, size or read
+ * it in full. */
 static unsigned char* read_file(const char* path, size_t* out_size) {
   FILE* file = fopen(path, "rb");
   if (file == nullptr) return nullptr;
@@ -422,6 +434,8 @@ static const char* basename_of(const char* path) {
   return name;
 }
 
+/* Read each `.rm` file named on the command line, parse it, and print it as
+ * JSON or as the indented text form, per `--json`. */
 int main(int argc, char** argv) {
   bool json = false;
   bool quiet = false;

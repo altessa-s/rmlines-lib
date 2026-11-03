@@ -47,6 +47,7 @@ typedef struct rm_draft_column {
   uint8_t setting;
 } rm_draft_column;
 
+/* The width and the setting that go together for this choice of column. */
 RM_API rm_draft_column rm_draft_column_of(rm_text_column column);
 
 /* One paragraph of the typed text. */
