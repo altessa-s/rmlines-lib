@@ -75,9 +75,7 @@ void rm_vec_free(rm_vec* vec);
 /* False on allocation failure, and then the vector is untouched. */
 [[nodiscard]] bool rm_vec_push(rm_vec* vec, const void* element);
 [[nodiscard]] bool rm_vec_reserve(rm_vec* vec, size_t capacity);
-static inline void* rm_vec_at(const rm_vec* vec, size_t index) {
-  return (unsigned char*)vec->data + index * vec->elem;
-}
+void* rm_vec_at(const rm_vec* vec, size_t index);
 
 /* A growable byte buffer: what the writer builds a block in. */
 typedef struct rm_buf {
@@ -117,9 +115,7 @@ size_t rm_utf8_scalar_count(const char* bytes, size_t length);
 size_t rm_utf8_repair(const char* bytes, size_t length, char* out);
 /* Three bytes out for every byte in is the worst case: a run of continuation
  * bytes is one U+FFFD each. */
-static inline size_t rm_utf8_repair_bound(size_t length) {
-  return length * 3u + 1u;
-}
+size_t rm_utf8_repair_bound(size_t length);
 
 /* Whether the scalar starting at `offset` is a newline, and where the next
  * one begins. The bytes must be valid UTF-8 — `rm_utf8_repair` has run. */
@@ -136,13 +132,9 @@ typedef struct rm_crdt_id {
   uint8_t author;
 } rm_crdt_id;
 
-static inline bool rm_crdt_equal(rm_crdt_id a, rm_crdt_id b) {
-  return a.counter == b.counter && a.author == b.author;
-}
+bool rm_crdt_equal(rm_crdt_id a, rm_crdt_id b);
 
-static inline rm_crdt_id rm_crdt_make(uint8_t author, uint64_t counter) {
-  return (rm_crdt_id){.counter = counter, .author = author};
-}
+rm_crdt_id rm_crdt_make(uint8_t author, uint64_t counter);
 
 constexpr rm_crdt_id RM_CRDT_NONE = {.counter = 0, .author = 0};
 
@@ -163,9 +155,7 @@ void rm_idmap_init(rm_idmap* map);
 void rm_idmap_free(rm_idmap* map);
 [[nodiscard]] bool rm_idmap_set(rm_idmap* map, rm_crdt_id key, uint64_t value);
 bool rm_idmap_get(const rm_idmap* map, rm_crdt_id key, uint64_t* out_value);
-static inline bool rm_idmap_contains(const rm_idmap* map, rm_crdt_id key) {
-  return rm_idmap_get(map, key, nullptr);
-}
+bool rm_idmap_contains(const rm_idmap* map, rm_crdt_id key);
 /* Take the entry out and answer what it held. Used, among other things, to
  * mark a bucket spent. */
 bool rm_idmap_take(rm_idmap* map, rm_crdt_id key, uint64_t* out_value);
@@ -254,9 +244,7 @@ typedef struct rm_reader {
 } rm_reader;
 
 void rm_reader_init(rm_reader* reader, const uint8_t* data, size_t size);
-static inline size_t rm_reader_remaining(const rm_reader* reader) {
-  return reader->size - reader->offset;
-}
+size_t rm_reader_remaining(const rm_reader* reader);
 
 /* Where `length` bytes starting at the position end, when they fit inside
  * `limit`, and false when they do not.
@@ -267,12 +255,8 @@ static inline size_t rm_reader_remaining(const rm_reader* reader) {
  * end passes every bound below it. Where such an end is seeked to, it walks
  * the reader backwards, and the loop that reads fields until the block ends
  * does not terminate. */
-static inline bool rm_fits_within(const rm_reader* reader, size_t length,
-                                  size_t limit, size_t* out_end) {
-  if (reader->offset > limit || length > limit - reader->offset) return false;
-  *out_end = reader->offset + length;
-  return true;
-}
+bool rm_fits_within(const rm_reader* reader, size_t length, size_t limit,
+                    size_t* out_end);
 
 [[nodiscard]] rm_status rm_read_seek(rm_reader* reader, size_t position);
 [[nodiscard]] rm_status rm_read_u8(rm_reader* reader, uint8_t* out);
@@ -408,13 +392,9 @@ void rm_write_top_block(rm_buf* file, uint8_t type, uint8_t min_version,
 constexpr uint8_t RM_BLOCK_SCENE_LINE_ITEM = 0x05;
 constexpr uint8_t RM_BLOCK_SCENE_GLYPH_ITEM = 0x03;
 
-static inline rm_item_id rm_item_id_of(rm_crdt_id id) {
-  return (rm_item_id){.author = id.author, .counter = id.counter};
-}
+rm_item_id rm_item_id_of(rm_crdt_id id);
 
-static inline rm_crdt_id rm_crdt_of(rm_item_id id) {
-  return rm_crdt_make(id.author, id.counter);
-}
+rm_crdt_id rm_crdt_of(rm_item_id id);
 
 /* The envelope every scene item starts with: the parent node, the item's own
  * identifier, its neighbours in the parent's list, and the count of what was

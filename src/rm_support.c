@@ -649,3 +649,29 @@ bool rm_grouping_number(const rm_grouping* grouping, rm_crdt_id key,
   if (out_number != nullptr) *out_number = (size_t)number;
   return true;
 }
+
+void* rm_vec_at(const rm_vec* vec, size_t index) {
+  return (unsigned char*)vec->data + index * vec->elem;
+}
+
+size_t rm_utf8_repair_bound(size_t length) { return length * 3u + 1u; }
+
+bool rm_crdt_equal(rm_crdt_id a, rm_crdt_id b) {
+  return a.counter == b.counter && a.author == b.author;
+}
+
+rm_crdt_id rm_crdt_make(uint8_t author, uint64_t counter) {
+  return (rm_crdt_id){.counter = counter, .author = author};
+}
+
+bool rm_idmap_contains(const rm_idmap* map, rm_crdt_id key) {
+  return rm_idmap_get(map, key, nullptr);
+}
+
+rm_item_id rm_item_id_of(rm_crdt_id id) {
+  return (rm_item_id){.author = id.author, .counter = id.counter};
+}
+
+rm_crdt_id rm_crdt_of(rm_item_id id) {
+  return rm_crdt_make(id.author, id.counter);
+}

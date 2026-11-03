@@ -366,3 +366,14 @@ void rm_write_top_block(rm_buf* file, uint8_t type, uint8_t min_version,
   rm_buf_append_byte(file, type);
   rm_buf_append(file, payload, length);
 }
+
+size_t rm_reader_remaining(const rm_reader* reader) {
+  return reader->size - reader->offset;
+}
+
+bool rm_fits_within(const rm_reader* reader, size_t length, size_t limit,
+                    size_t* out_end) {
+  if (reader->offset > limit || length > limit - reader->offset) return false;
+  *out_end = reader->offset + length;
+  return true;
+}
