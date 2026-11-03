@@ -33,6 +33,7 @@ cmake --build build --target check      # the test suites, through CTest
 | `RMLINES_BUILD_TESTS` | on when top-level | Build the test suites |
 | `RMLINES_BUILD_TOOLS` | on when top-level | Build `rmdump` |
 | `RMLINES_WERROR` | `OFF` | Turn warnings into errors |
+| `RMLINES_LTO` | `ON` | Link-time optimization for optimized shared builds |
 | `RMLINES_BUILD_FUZZERS` | `OFF` | Build the libFuzzer target (clang only) |
 
 Installing gives headers, the library, a CMake package and a pkg-config file:
