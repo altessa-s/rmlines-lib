@@ -13,9 +13,8 @@
 #ifndef RMLINES_PARSER_H
 #define RMLINES_PARSER_H
 
-#include "rmlines/types.h"
-
 #include "rmlines/export.h"
+#include "rmlines/types.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,7 +31,8 @@ extern "C" {
 constexpr int RM_SUPPORTED_VERSION = 6;
 constexpr size_t RM_HEADER_LENGTH = sizeof(RM_HEADER) - 1;
 
-static_assert(RM_HEADER_LENGTH == 43, "the header is 43 bytes, padding included");
+static_assert(RM_HEADER_LENGTH == 43,
+              "the header is 43 bytes, padding included");
 
 /* The version a header declares, or false when the bytes are not one.
  *
@@ -40,7 +40,8 @@ static_assert(RM_HEADER_LENGTH == 43, "the header is 43 bytes, padding included"
  * spellings: the point is to recognise a generation nobody has written down
  * yet — a future 7 as much as the 3 and the 5 behind us — and say its number
  * instead of calling the file unrecognisable. */
-RM_API bool rm_header_version(const char *header, size_t length, int *out_version);
+RM_API bool rm_header_version(const char* header, size_t length,
+                              int* out_version);
 
 /* Read one page.
  *
@@ -59,20 +60,20 @@ RM_API bool rm_header_version(const char *header, size_t length, int *out_versio
  * stops there: the block is stepped over, the loss is added to
  * `rm_page.skipped_blocks`, and a line goes to the diagnostics sink. A page is
  * not lost for one stroke it could not read. */
-[[nodiscard]] RM_API rm_status rm_parse_page(const uint8_t *data,
-                                      size_t size,
-                                      rm_page **out_page,
-                                      rm_error *out_error);
+[[nodiscard]] RM_API rm_status rm_parse_page(const uint8_t* data, size_t size,
+                                             rm_page** out_page,
+                                             rm_error* out_error);
 
 /* Release a page and everything it points at. Null is accepted and ignored. */
-RM_API void rm_page_free(rm_page *page);
+RM_API void rm_page_free(rm_page* page);
 
 /* Name the page's template.
  *
  * The name is not in the `.rm` — it comes from the document's `.content` —
  * so the parser never sets it and the layer that holds documents does. The
  * string is copied into the page's own arena; pass null to clear it. */
-[[nodiscard]] RM_API rm_status rm_page_set_template(rm_page *page, const char *name);
+[[nodiscard]] RM_API rm_status rm_page_set_template(rm_page* page,
+                                                    const char* name);
 
 #ifdef __cplusplus
 }

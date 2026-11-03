@@ -14,9 +14,8 @@
 #ifndef RMLINES_EDITOR_H
 #define RMLINES_EDITOR_H
 
-#include "rmlines/types.h"
-
 #include "rmlines/export.h"
+#include "rmlines/types.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -47,13 +46,9 @@ extern "C" {
  * unread. A page that does not parse is refused with the status
  * `rm_parse_page` gives it. On success `*out_bytes` is yours until
  * `rm_bytes_free`; on failure nothing is allocated. `out_error` may be null. */
-[[nodiscard]] RM_API rm_status rm_erase_items(const uint8_t *data,
-                                              size_t size,
-                                              const rm_item_id *ids,
-                                              size_t id_count,
-                                              uint8_t **out_bytes,
-                                              size_t *out_size,
-                                              rm_error *out_error);
+[[nodiscard]] RM_API rm_status rm_erase_items(
+    const uint8_t* data, size_t size, const rm_item_id* ids, size_t id_count,
+    uint8_t** out_bytes, size_t* out_size, rm_error* out_error);
 
 /* Every living mark of the highlighter on a page: its strokes, on every layer
  * — a layer hidden on the tablet included, since showing it again would bring
@@ -72,15 +67,15 @@ extern "C" {
  * Each identifier once, strokes in file order and then highlights. On success
  * `*out_ids` is yours until `rm_item_ids_free` — null when `*out_count` is
  * nought. Otherwise the statuses are those of `rm_parse_page`. */
-[[nodiscard]] RM_API rm_status rm_highlighter_items(const uint8_t *data,
+[[nodiscard]] RM_API rm_status rm_highlighter_items(const uint8_t* data,
                                                     size_t size,
-                                                    rm_item_id **out_ids,
-                                                    size_t *out_count,
-                                                    rm_error *out_error);
+                                                    rm_item_id** out_ids,
+                                                    size_t* out_count,
+                                                    rm_error* out_error);
 
 /* Release what `rm_highlighter_items` handed over. Null is accepted and
  * ignored. */
-RM_API void rm_item_ids_free(rm_item_id *ids);
+RM_API void rm_item_ids_free(rm_item_id* ids);
 
 #ifdef __cplusplus
 }

@@ -20,29 +20,31 @@
 
 #include "rmlines/parser.h"
 
-int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size);
 
-int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
-    rm_page *page = nullptr;
-    rm_error error;
-    if (rm_parse_page(data, size, &page, &error) == RM_OK) {
-        /* Touched rather than merely freed: a page that parses has to be a
-         * page that can be read, and the arrays hang off counts the file
-         * chose. */
-        volatile size_t seen = 0;
-        for (size_t i = 0; i < page->stroke_count; i += 1) seen += page->strokes[i].point_count;
-        for (size_t i = 0; i < page->highlight_count; i += 1) {
-            seen += page->highlights[i].rectangle_count;
-        }
-        for (size_t i = 0; i < page->image_count; i += 1) seen += page->images[i].file.length;
-        if (page->has_text) {
-            for (size_t i = 0; i < page->text.paragraph_count; i += 1) {
-                seen += page->text.paragraphs[i].text.length;
-                seen += page->text.paragraphs[i].face_count;
-            }
-        }
-        (void)seen;
-        rm_page_free(page);
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+  rm_page* page = nullptr;
+  rm_error error;
+  if (rm_parse_page(data, size, &page, &error) == RM_OK) {
+    /* Touched rather than merely freed: a page that parses has to be a
+     * page that can be read, and the arrays hang off counts the file
+     * chose. */
+    volatile size_t seen = 0;
+    for (size_t i = 0; i < page->stroke_count; i += 1)
+      seen += page->strokes[i].point_count;
+    for (size_t i = 0; i < page->highlight_count; i += 1) {
+      seen += page->highlights[i].rectangle_count;
     }
-    return 0;
+    for (size_t i = 0; i < page->image_count; i += 1)
+      seen += page->images[i].file.length;
+    if (page->has_text) {
+      for (size_t i = 0; i < page->text.paragraph_count; i += 1) {
+        seen += page->text.paragraphs[i].text.length;
+        seen += page->text.paragraphs[i].face_count;
+      }
+    }
+    (void)seen;
+    rm_page_free(page);
+  }
+  return 0;
 }
