@@ -693,6 +693,23 @@ static void append_removal(rm_buf* page, rm_crdt_id node) {
   rm_buf_free(&record);
 }
 
+/* A node put back into the tree under `parent`: a fresh record whose tag 2
+ * names the node, as the tablet writes when it moves typed text and the
+ * handwriting anchored to it. */
+static void append_reinsertion(rm_buf* page, rm_crdt_id node,
+                               rm_crdt_id parent) {
+  rm_buf record = {0}, place = {0};
+  rm_write_id(&record, 1, rm_crdt_make(1, 96));
+  rm_write_id(&record, 2, node);
+  rm_write_tag(&record, 3, RM_TAG_BYTE1);
+  rm_buf_append_byte(&record, 1);
+  rm_write_id(&place, 1, parent);
+  rm_write_block(&record, 4, place.bytes, place.count);
+  append_block(page, 1, 1, 1, record.bytes, record.count);
+  rm_buf_free(&record);
+  rm_buf_free(&place);
+}
+
 static const rm_crdt_id SHOWN = {.counter = 11, .author = 1};
 static const rm_crdt_id HIDDEN = {.counter = 21, .author = 1};
 
@@ -817,6 +834,112 @@ static void a_group_nested_in_a_removed_layer_is_as_gone_as_the_layer(void) {
   rm_buf_free(&page);
 }
 
+/* Whether the page draws exactly the one stroke `id`. */
+static bool draws_only(const rm_buf* page, rm_item_id id) {
+  rm_page* drawn = parse(page->bytes, page->count);
+  bool only = drawn != nullptr && drawn->stroke_count == 1 &&
+              rm_item_id_equal(drawn->strokes[0].id, id);
+  rm_page_free(drawn);
+  return only;
+}
+
+/* Whether the highlighter search finds exactly the one mark `id`. */
+static bool finds_only(const rm_buf* page, rm_item_id id) {
+  rm_item_id* ids;
+  size_t count = highlighter_items(page->bytes, page->count, &ids);
+  bool only = count == 1 && rm_item_id_equal(ids[0], id);
+  rm_item_ids_free(ids);
+  return only;
+}
+
+static void a_layer_taken_out_and_put_back_is_drawn_and_searched_again(void) {
+  rm_buf page;
+  start_page(&page);
+  append_layer(&page, HIDDEN, false, rm_crdt_make(1, 22));
+  append_removal(&page, HIDDEN);
+  append_reinsertion(&page, HIDDEN, rm_crdt_make(0, 1));
+  append_stroke(&page, rm_crdt_make(1, 31), HIDDEN, RM_TOOL_HIGHLIGHTER_2);
+  rm_page* drawn = parse(page.bytes, page.count);
+  RM_CHECK(drawn != nullptr && drawn->skipped_blocks == 0,
+           "the page parses and loses nothing");
+  rm_page_free(drawn);
+  RM_CHECK(draws_only(&page, (rm_item_id){1, 31}), "the layer is drawn again");
+  RM_CHECK(finds_only(&page, (rm_item_id){1, 31}),
+           "the layer is searched again");
+  rm_buf_free(&page);
+}
+
+static void a_group_moved_under_a_layer_later_removed_goes_with_it(void) {
+  const rm_crdt_id group = rm_crdt_make(1, 41);
+  rm_buf page;
+  start_page(&page);
+  append_two_layers(&page, false);
+  append_nested_group(&page, SHOWN, rm_crdt_make(1, 42), group);
+  append_reinsertion(&page, group, HIDDEN);
+  append_removal(&page, HIDDEN);
+  append_stroke(&page, rm_crdt_make(1, 31), group, RM_TOOL_HIGHLIGHTER_2);
+  rm_page* drawn = parse(page.bytes, page.count);
+  RM_CHECK(drawn != nullptr && drawn->stroke_count == 0,
+           "the moved group is not drawn");
+  rm_page_free(drawn);
+  rm_item_id* ids;
+  RM_CHECK_EQ_SIZE(highlighter_items(page.bytes, page.count, &ids), 0,
+                   "the moved group is not searched");
+  rm_item_ids_free(ids);
+  rm_buf_free(&page);
+}
+
+static void a_group_moved_out_of_a_layer_later_removed_stays(void) {
+  const rm_crdt_id group = rm_crdt_make(1, 41);
+  rm_buf page;
+  start_page(&page);
+  append_two_layers(&page, false);
+  append_nested_group(&page, HIDDEN, rm_crdt_make(1, 42), group);
+  append_reinsertion(&page, group, SHOWN);
+  append_removal(&page, HIDDEN);
+  append_stroke(&page, rm_crdt_make(1, 31), group, RM_TOOL_HIGHLIGHTER_2);
+  RM_CHECK(draws_only(&page, (rm_item_id){1, 31}), "the moved group is drawn");
+  RM_CHECK(finds_only(&page, (rm_item_id){1, 31}),
+           "the moved group is searched");
+  rm_buf_free(&page);
+}
+
+static void a_group_moved_and_linked_under_its_new_layer_is_drawn_once(void) {
+  const rm_crdt_id group = rm_crdt_make(1, 41);
+  rm_buf page;
+  start_page(&page);
+  append_two_layers(&page, true);
+  append_nested_group(&page, HIDDEN, rm_crdt_make(1, 42), group);
+  append_nested_group(&page, SHOWN, rm_crdt_make(1, 43), group);
+  append_reinsertion(&page, group, SHOWN);
+  append_stroke(&page, rm_crdt_make(1, 31), group, RM_TOOL_FINELINER_2);
+  /* Under the shown layer now: the stale link into the hidden one neither
+   * hides it nor draws it a second time. */
+  RM_CHECK(draws_only(&page, (rm_item_id){1, 31}),
+           "drawn once, from the shown layer");
+  rm_buf_free(&page);
+}
+
+static void a_tree_record_whose_parent_runs_past_its_block_does_not_read(void) {
+  rm_buf page, record = {0};
+  start_page(&page);
+  append_layer(&page, HIDDEN, false, rm_crdt_make(1, 22));
+  rm_write_id(&record, 1, rm_crdt_make(1, 96));
+  rm_write_id(&record, 2, HIDDEN);
+  rm_write_tag(&record, 3, RM_TAG_BYTE1);
+  rm_buf_append_byte(&record, 1);
+  rm_write_tag(&record, 4, RM_TAG_LENGTH4);
+  append_block(&page, 1, 1, 1, record.bytes, record.count);
+  append_stroke(&page, rm_crdt_make(1, 31), HIDDEN, RM_TOOL_FINELINER_2);
+  rm_page* drawn = parse(page.bytes, page.count);
+  RM_CHECK(drawn != nullptr && drawn->skipped_blocks == 1,
+           "the record is a block that does not read");
+  rm_page_free(drawn);
+  RM_CHECK(draws_only(&page, (rm_item_id){1, 31}), "the layer is still drawn");
+  rm_buf_free(&record);
+  rm_buf_free(&page);
+}
+
 static void
 a_page_with_a_block_that_will_not_read_is_refused_not_answered_in_part(void) {
   rm_buf page, broken;
@@ -897,6 +1020,11 @@ int main(void) {
   the_marker_on_a_hidden_layer_is_erased_and_the_layer_keeps_its_pen();
   a_layer_taken_out_of_the_tree_is_not_searched();
   a_group_nested_in_a_removed_layer_is_as_gone_as_the_layer();
+  a_layer_taken_out_and_put_back_is_drawn_and_searched_again();
+  a_group_moved_under_a_layer_later_removed_goes_with_it();
+  a_group_moved_out_of_a_layer_later_removed_stays();
+  a_group_moved_and_linked_under_its_new_layer_is_drawn_once();
+  a_tree_record_whose_parent_runs_past_its_block_does_not_read();
   a_page_with_a_block_that_will_not_read_is_refused_not_answered_in_part();
   highlights_over_a_text_layer_are_found_with_the_strokes();
   return rm_test_report("editor");
