@@ -26,13 +26,14 @@
  * is one edit, and the library cannot report a version its package does not
  * carry. */
 #define RMLINES_VERSION_MAJOR 1
-#define RMLINES_VERSION_MINOR 0
-#define RMLINES_VERSION_PATCH 1
+#define RMLINES_VERSION_MINOR 1
+#define RMLINES_VERSION_PATCH 0
 
 #define RMLINES_STRINGIFY_(x) #x
 #define RMLINES_STRINGIFY(x) RMLINES_STRINGIFY_(x)
-#define RMLINES_VERSION_STRING                                                 \
-    RMLINES_STRINGIFY(RMLINES_VERSION_MAJOR) "." RMLINES_STRINGIFY(RMLINES_VERSION_MINOR) "." \
-    RMLINES_STRINGIFY(RMLINES_VERSION_PATCH)
+#define RMLINES_VERSION_STRING                                        \
+  RMLINES_STRINGIFY(RMLINES_VERSION_MAJOR)                            \
+  "." RMLINES_STRINGIFY(RMLINES_VERSION_MINOR) "." RMLINES_STRINGIFY( \
+      RMLINES_VERSION_PATCH)
 
 #endif /* RMLINES_H */

@@ -37,19 +37,20 @@ extern "C" {
  * lost (RM_LOG_ERROR), or the format held something this parser does not know
  * and read past (RM_LOG_DEBUG). */
 typedef enum rm_log_level : int {
-    RM_LOG_DEBUG,
-    RM_LOG_ERROR,
+  RM_LOG_DEBUG,
+  RM_LOG_ERROR,
 } rm_log_level;
 
 /* What a host installs. Called on whichever thread parsed the page — the
  * parser runs wherever the work is, and a sink that touches shared state must
  * say so itself. `message` is NUL-terminated and is not owned by the sink: it
  * lives only for the duration of the call. */
-typedef void (*rm_log_sink)(rm_log_level level, const char *message, void *context);
+typedef void (*rm_log_sink)(rm_log_level level, const char* message,
+                            void* context);
 
 /* Name the sink for this process. Once, at its start, from the composition
  * root; a later call replaces the earlier one. */
-RM_API void rm_log_install(rm_log_sink sink, void *context);
+RM_API void rm_log_install(rm_log_sink sink, void* context);
 
 /* Go back to silence. For a test that installed a sink and must not leave it
  * behind for the next one. */

@@ -18,9 +18,8 @@
 #ifndef RMLINES_WRITER_H
 #define RMLINES_WRITER_H
 
-#include "rmlines/types.h"
-
 #include "rmlines/export.h"
+#include "rmlines/types.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,13 +29,13 @@ extern "C" {
  * sheet it is decides where absolute units land — a page claiming the legacy
  * 1404 × 1872 puts its text in the side area of a Paper Pro Move. */
 typedef struct rm_draft_sheet {
-    /* `tag 5` of SceneInfo — the size as whole units. */
-    uint32_t screen_width;
-    uint32_t screen_height;
-    /* `tags 7` and `8` — the same size unrounded, and the one the format
-     * calls authoritative. */
-    double canvas_width;
-    double canvas_height;
+  /* `tag 5` of SceneInfo — the size as whole units. */
+  uint32_t screen_width;
+  uint32_t screen_height;
+  /* `tags 7` and `8` — the same size unrounded, and the one the format
+   * calls authoritative. */
+  double canvas_width;
+  double canvas_height;
 } rm_draft_sheet;
 
 /* The typed-text column: its width in the file's own units, and which of the
@@ -44,40 +43,41 @@ typedef struct rm_draft_sheet {
  * width. The two have to agree; `rm_draft_column_of` is how a caller is kept
  * from inventing a fourth or pairing a width with the wrong setting. */
 typedef struct rm_draft_column {
-    float width;
-    uint8_t setting;
+  float width;
+  uint8_t setting;
 } rm_draft_column;
 
+/* The width and the setting that go together for this choice of column. */
 RM_API rm_draft_column rm_draft_column_of(rm_text_column column);
 
 /* One paragraph of the typed text. */
 typedef struct rm_draft_paragraph {
-    /* NUL-terminated UTF-8. Must not contain a newline: a paragraph is a
-     * paragraph, and the writer puts the newlines in. Ill-formed bytes are
-     * written as U+FFFD, by the Unicode "maximal subpart" rule. */
-    const char *text;
-    /* The `tag 1` style value; absent writes no style record (plain body). */
-    bool has_style;
-    uint8_t style;
-    /* `tag 2` / `tag 3` of the style record (emphasised paragraphs, nested
-     * lists). */
-    bool has_second;
-    uint8_t second;
-    bool has_third;
-    uint32_t third;
-    bool bold;
-    bool italic;
+  /* NUL-terminated UTF-8. Must not contain a newline: a paragraph is a
+   * paragraph, and the writer puts the newlines in. Ill-formed bytes are
+   * written as U+FFFD, by the Unicode "maximal subpart" rule. */
+  const char* text;
+  /* The `tag 1` style value; absent writes no style record (plain body). */
+  bool has_style;
+  uint8_t style;
+  /* `tag 2` / `tag 3` of the style record (emphasised paragraphs, nested
+   * lists). */
+  bool has_second;
+  uint8_t second;
+  bool has_third;
+  uint32_t third;
+  bool bold;
+  bool italic;
 } rm_draft_paragraph;
 
 /* One sample of a stroke, with the raw numbers the file stores beside the
  * coordinates. The drawn half-width is `width / 4` in sheet units; the writer
  * stores, it does not interpret. */
 typedef struct rm_draft_point {
-    float x, y;
-    uint16_t speed;
-    uint16_t width;
-    uint8_t direction;
-    uint8_t pressure;
+  float x, y;
+  uint16_t speed;
+  uint16_t width;
+  uint8_t direction;
+  uint8_t pressure;
 } rm_draft_point;
 
 /* The defaults: a width of 12 and a pressure of 6. */
@@ -85,56 +85,58 @@ RM_API rm_draft_point rm_draft_point_make(float x, float y);
 
 /* One stroke: the tool, the colour, and the points as written. */
 typedef struct rm_draft_stroke {
-    rm_pen_tool tool;
-    /* The palette index, `tag 2` of the stroke. */
-    rm_pen_color color;
-    /* `tag 8`, 0xAARRGGBB. Set only where an index cannot name the colour:
-     * the shader's colours. The highlighter's blue and orange have indexes of
-     * their own (RM_COLOR_HIGHLIGHTER_BLUE, _ORANGE), which the tablet writes
-     * with no `argb`; some pages spell them as 9 plus `argb`. */
-    bool has_argb;
-    uint32_t argb;
-    /* `thicknessScale` — the setting on the tablet, 1, 2 or 3, and not a
-     * factor: whatever it does to the line is already in each point's
-     * `width`. */
-    double thickness;
-    const rm_draft_point *points;
-    size_t point_count;
+  rm_pen_tool tool;
+  /* The palette index, `tag 2` of the stroke. */
+  rm_pen_color color;
+  /* `tag 8`, 0xAARRGGBB. Set only where an index cannot name the colour:
+   * the shader's colours. The highlighter's blue and orange have indexes of
+   * their own (RM_COLOR_HIGHLIGHTER_BLUE, _ORANGE), which the tablet writes
+   * with no `argb`; some pages spell them as 9 plus `argb`. */
+  bool has_argb;
+  uint32_t argb;
+  /* `thicknessScale` — the setting on the tablet, 1, 2 or 3, and not a
+   * factor: whatever it does to the line is already in each point's
+   * `width`. */
+  double thickness;
+  const rm_draft_point* points;
+  size_t point_count;
 } rm_draft_stroke;
 
 /* The defaults: no `argb` and a thickness of 2. The
  * points are borrowed, not copied. */
-RM_API rm_draft_stroke rm_draft_stroke_make(rm_pen_tool tool, rm_pen_color color,
-                                            const rm_draft_point *points, size_t point_count);
+RM_API rm_draft_stroke rm_draft_stroke_make(rm_pen_tool tool,
+                                            rm_pen_color color,
+                                            const rm_draft_point* points,
+                                            size_t point_count);
 
 /* What an anchored stroke hangs on. */
 typedef enum rm_anchor_kind : int32_t {
-    /* The first character of the paragraph: `anchor_type 1`, threshold 0. */
-    RM_ANCHOR_FIRST_CHARACTER,
-    /* The sentinel "before the text": a line anchor, `anchor_type 2`,
-     * threshold 35.75. */
-    RM_ANCHOR_BEFORE_TEXT,
-    /* The sentinel "after the text" — just past the last character typed,
-     * in the paragraph the last Return closes. */
-    RM_ANCHOR_AFTER_TEXT,
+  /* The first character of the paragraph: `anchor_type 1`, threshold 0. */
+  RM_ANCHOR_FIRST_CHARACTER,
+  /* The sentinel "before the text": a line anchor, `anchor_type 2`,
+   * threshold 35.75. */
+  RM_ANCHOR_BEFORE_TEXT,
+  /* The sentinel "after the text" — just past the last character typed,
+   * in the paragraph the last Return closes. */
+  RM_ANCHOR_AFTER_TEXT,
 } rm_anchor_kind;
 
 typedef struct rm_draft_anchor {
-    rm_anchor_kind kind;
-    /* Read only for RM_ANCHOR_FIRST_CHARACTER. */
-    int32_t paragraph;
+  rm_anchor_kind kind;
+  /* Read only for RM_ANCHOR_FIRST_CHARACTER. */
+  int32_t paragraph;
 } rm_draft_anchor;
 
 /* A stroke hung on the typed text rather than on the sheet: its coordinates
  * are counted from the pen, so the ink follows the text when it reflows. */
 typedef struct rm_draft_mark {
-    rm_draft_anchor anchor;
-    /* `anchor_origin_x` — where the pen stands. The left edge of the text for
-     * most anchors; the end of the last line for the sentinel after it. The
-     * end of a line is the layout's to know, and the format has no layout —
-     * so the number arrives from the caller. */
-    float pen_origin;
-    rm_draft_stroke stroke;
+  rm_draft_anchor anchor;
+  /* `anchor_origin_x` — where the pen stands. The left edge of the text for
+   * most anchors; the end of the last line for the sentinel after it. The
+   * end of a line is the layout's to know, and the format has no layout —
+   * so the number arrives from the caller. */
+  float pen_origin;
+  rm_draft_stroke stroke;
 } rm_draft_mark;
 
 /* A picture placed on the page. The pixels are not in the `.rm`: the file
@@ -143,29 +145,29 @@ typedef struct rm_draft_mark {
  * not a hash of the pixels — and the UV corners of an uncropped image are
  * plain noughts and ones. */
 typedef struct rm_draft_image {
-    /* The attachment's file name as the map spells it: `<uuid>.png`,
-     * extension included. NUL-terminated UTF-8; ill-formed bytes are written
-     * as U+FFFD. */
-    const char *file;
-    /* The 16 opaque bytes the item and the attachment map share. Sixteen
-     * exactly — which is why this is an array and not a pointer and a count:
-     * the item and the map have to name the attachment with the same bytes,
-     * and a key of another length would be written out all the same, read
-     * back as no image at all, and counted nowhere. */
-    uint8_t key[16];
-    /* The axis-aligned placement, in sheet units: x from the middle, y from
-     * the top — or, for an anchored image, both counted from the pen at the
-     * anchor, the way a mark's points are. */
-    float x, y, width, height;
-    /* Fastened to the typed text rather than to the sheet, when set. The
-     * tablet hangs such an image on a group carrying the same four anchor
-     * fields a mark's group does, and the item's parent is that group instead
-     * of the layer. */
-    bool has_anchor;
-    rm_draft_anchor anchor;
-    /* `anchor_origin_x` for the anchored placement, exactly as on a mark.
-     * Read only when `has_anchor`. */
-    float pen_origin;
+  /* The attachment's file name as the map spells it: `<uuid>.png`,
+   * extension included. NUL-terminated UTF-8; ill-formed bytes are written
+   * as U+FFFD. */
+  const char* file;
+  /* The 16 opaque bytes the item and the attachment map share. Sixteen
+   * exactly — which is why this is an array and not a pointer and a count:
+   * the item and the map have to name the attachment with the same bytes,
+   * and a key of another length would be written out all the same, read
+   * back as no image at all, and counted nowhere. */
+  uint8_t key[16];
+  /* The axis-aligned placement, in sheet units: x from the middle, y from
+   * the top — or, for an anchored image, both counted from the pen at the
+   * anchor, the way a mark's points are. */
+  float x, y, width, height;
+  /* Fastened to the typed text rather than to the sheet, when set. The
+   * tablet hangs such an image on a group carrying the same four anchor
+   * fields a mark's group does, and the item's parent is that group instead
+   * of the layer. */
+  bool has_anchor;
+  rm_draft_anchor anchor;
+  /* `anchor_origin_x` for the anchored placement, exactly as on a mark.
+   * Read only when `has_anchor`. */
+  float pen_origin;
 } rm_draft_image;
 
 /* A page to be written: everything `rm_write_page` needs, in the same
@@ -178,36 +180,36 @@ typedef struct rm_draft_image {
  *
  * Every array is borrowed for the duration of the call and copied nowhere. */
 typedef struct rm_page_draft {
-    /* The page's author, author index 1 of its identifier table. A
-     * document's `.content` spells the same UUID, in the same byte order. */
-    uint8_t author[16];
-    /* The author the formatting marks are written under, when the text
-     * carries any.
-     *
-     * A page with a bold or an italic stretch names a second author: on a
-     * tablet's page those marks are another session's edits, and their author
-     * index has to resolve in the table. What the value *is* decides nothing
-     * that is drawn — only that the index resolves. Left unset, one is
-     * derived from `author`, and derived the same way every time: a fresh
-     * UUID here would make the same draft write different bytes on every
-     * call. */
-    bool has_marks_author;
-    uint8_t marks_author[16];
-    rm_draft_sheet sheet;
-    rm_draft_column column;
-    const rm_draft_paragraph *paragraphs;
-    size_t paragraph_count;
-    /* Strokes hung on nothing, in the sheet's own coordinates. */
-    const rm_draft_stroke *strokes;
-    size_t stroke_count;
-    /* Strokes hung on the text. */
-    const rm_draft_mark *marks;
-    size_t mark_count;
-    /* Pictures placed on the page. They stand at the end of the drawing
-     * chain, over the strokes — where a freshly inserted image stands on a
-     * page the tablet wrote. */
-    const rm_draft_image *images;
-    size_t image_count;
+  /* The page's author, author index 1 of its identifier table. A
+   * document's `.content` spells the same UUID, in the same byte order. */
+  uint8_t author[16];
+  /* The author the formatting marks are written under, when the text
+   * carries any.
+   *
+   * A page with a bold or an italic stretch names a second author: on a
+   * tablet's page those marks are another session's edits, and their author
+   * index has to resolve in the table. What the value *is* decides nothing
+   * that is drawn — only that the index resolves. Left unset, one is
+   * derived from `author`, and derived the same way every time: a fresh
+   * UUID here would make the same draft write different bytes on every
+   * call. */
+  bool has_marks_author;
+  uint8_t marks_author[16];
+  rm_draft_sheet sheet;
+  rm_draft_column column;
+  const rm_draft_paragraph* paragraphs;
+  size_t paragraph_count;
+  /* Strokes hung on nothing, in the sheet's own coordinates. */
+  const rm_draft_stroke* strokes;
+  size_t stroke_count;
+  /* Strokes hung on the text. */
+  const rm_draft_mark* marks;
+  size_t mark_count;
+  /* Pictures placed on the page. They stand at the end of the drawing
+   * chain, over the strokes — where a freshly inserted image stands on a
+   * page the tablet wrote. */
+  const rm_draft_image* images;
+  size_t image_count;
 } rm_page_draft;
 
 /* Write the whole `.rm` file of one page.
@@ -225,13 +227,13 @@ typedef struct rm_page_draft {
  * RM_ERR_TOO_MANY_TO_NUMBER when there are more items of one kind than a
  * page's identifier ranges can name (`rm_error.value` is the limit and
  * `rm_error.message` says of what). */
-[[nodiscard]] RM_API rm_status rm_write_page(const rm_page_draft *draft,
-                                      uint8_t **out_bytes,
-                                      size_t *out_size,
-                                      rm_error *out_error);
+[[nodiscard]] RM_API rm_status rm_write_page(const rm_page_draft* draft,
+                                             uint8_t** out_bytes,
+                                             size_t* out_size,
+                                             rm_error* out_error);
 
 /* Release what `rm_write_page` handed over. Null is accepted and ignored. */
-RM_API void rm_bytes_free(uint8_t *bytes);
+RM_API void rm_bytes_free(uint8_t* bytes);
 
 #ifdef __cplusplus
 }

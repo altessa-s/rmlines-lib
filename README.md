@@ -7,6 +7,9 @@ A standalone C23 library with no dependency beyond the C standard library. It is
 **[rmlines-swift](https://github.com/altessa-s/rmlines-swift)**, the Swift package for Apple platforms: the two read the same pages to the same
 strokes, text and styles, and write the same draft to the same bytes.
 
+Part of **[Slate Drive](https://slatedrive.app)** ([repository](https://github.com/altessa-s/slatedrive)), the macOS app that shows a reMarkable
+library in Finder.
+
 ## Why it exists
 
 A notebook on disk is a CRDT of tagged blocks, not a picture. Turning one into the other is two jobs: **read the file**, then **draw what was read**.
@@ -33,6 +36,7 @@ cmake --build build --target check      # the test suites, through CTest
 | `RMLINES_BUILD_TESTS` | on when top-level | Build the test suites |
 | `RMLINES_BUILD_TOOLS` | on when top-level | Build `rmdump` |
 | `RMLINES_WERROR` | `OFF` | Turn warnings into errors |
+| `RMLINES_LTO` | `ON` | Link-time optimization for optimized shared builds |
 | `RMLINES_BUILD_FUZZERS` | `OFF` | Build the libFuzzer target (clang only) |
 
 Installing gives headers, the library, a CMake package and a pkg-config file:
@@ -214,10 +218,17 @@ inside somebody's application, in a task nothing interrupts; a page built to be 
 | `tools/rmdump.c` | The command-line dump |
 | `tests/` | The test suites, hand-built pages and a sample corpus |
 
+## Bindings
+
+- **[rmlines-swift](https://github.com/altessa-s/rmlines-swift)** — the same page format as a Swift package for macOS and iOS, with an
+  `RMLines.xcframework` for binary consumers.
+- **[rmlines-go](https://github.com/altessa-s/rmlines-go)** — Go bindings over this library.
+
 ## See also
 
-- **[rmlines-swift](https://github.com/altessa-s/rmlines-swift)** — the same format as a Swift package for macOS and iOS, with an `RMLines.xcframework`
-  for binary consumers.
+- **[rmdoc-lib](https://github.com/altessa-s/rmdoc-lib)** — the `.rmdoc` container a document and its pages travel in.
+- **[rmmarks-lib](https://github.com/altessa-s/rmmarks-lib)** — which words a highlight covers, and how OCR from cropped strips returns to the page.
+- **[rmrender-lib](https://github.com/altessa-s/rmrender-lib)** — pages and documents drawn to bitmaps and PDF, with pen textures, templates and typed text.
 
 ## Acknowledgements
 

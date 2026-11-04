@@ -28,6 +28,7 @@ include(CMakePackageConfigHelpers)
 option(RMLINES_BUILD_TESTS "Build the test suite" ${PROJECT_IS_TOP_LEVEL})
 option(RMLINES_BUILD_TOOLS "Build the rmdump command-line tool" ${PROJECT_IS_TOP_LEVEL})
 option(RMLINES_WERROR "Turn compiler warnings into errors" OFF)
+option(RMLINES_LTO "Link-time optimization for optimized shared builds" ON)
 option(RMLINES_BUILD_FUZZERS "Build the libFuzzer targets (clang only)" OFF)
 
 # ---------------------------------------------------------------------------
@@ -80,6 +81,21 @@ set_target_properties(rmlines PROPERTIES
 
 if(BUILD_SHARED_LIBS)
     target_compile_definitions(rmlines PRIVATE RMLINES_BUILDING_SHARED)
+endif()
+
+# Link-time optimization for the shared library only: a static archive built
+# with it holds compiler bitcode that another compiler cannot link.
+if(BUILD_SHARED_LIBS AND RMLINES_LTO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT RMLINES_IPO OUTPUT RMLINES_IPO_ERROR LANGUAGES C)
+    if(RMLINES_IPO)
+        set_target_properties(rmlines PROPERTIES
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE ON
+            INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON
+            INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ON)
+    else()
+        message(STATUS "rmlines: link-time optimization unavailable: ${RMLINES_IPO_ERROR}")
+    endif()
 endif()
 
 # The warning set, and it is one set: the library is built with clang or

@@ -175,3 +175,14 @@ jobs:
             leak-*
             timeout-*
           if-no-files-found: ignore
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      # The same clang-format release on every machine; .clang-format-ignore
+      # keeps generated and third-party files out.
+      - run: python3 -m pip install clang-format==21.1.8
+      - run: git ls-files '*.c' '*.h' | xargs clang-format --dry-run --Werror

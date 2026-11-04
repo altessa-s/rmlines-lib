@@ -13,17 +13,17 @@
 #define RMLINES_EXPORT_H
 
 #if defined(_WIN32) || defined(__CYGWIN__)
-#  if defined(RMLINES_BUILDING_SHARED)
-#    define RM_API __declspec(dllexport)
-#  elif defined(RMLINES_USING_SHARED)
-#    define RM_API __declspec(dllimport)
-#  else
-#    define RM_API
-#  endif
-#elif defined(__GNUC__) || defined(__clang__)
-#  define RM_API __attribute__((visibility("default")))
+#if defined(RMLINES_BUILDING_SHARED)
+#define RM_API __declspec(dllexport)
+#elif defined(RMLINES_USING_SHARED)
+#define RM_API __declspec(dllimport)
 #else
-#  define RM_API
+#define RM_API
+#endif
+#elif defined(__GNUC__) || defined(__clang__)
+#define RM_API __attribute__((visibility("default")))
+#else
+#define RM_API
 #endif
 
 #endif /* RMLINES_EXPORT_H */
