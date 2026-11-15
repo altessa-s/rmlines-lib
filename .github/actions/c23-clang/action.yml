@@ -17,13 +17,22 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install clang ${{ inputs.version }} from apt.llvm.org
+    # The distribution's own package first: Ubuntu 24.04 and 26.04 both carry
+    # clang 19 beside their default. apt.llvm.org's llvm.sh is the fallback
+    # for a version they do not carry — and only the fallback, because it
+    # registers its key with apt-key, which Ubuntu 26.04 no longer has.
+    - name: Install clang ${{ inputs.version }}
       shell: bash
+      env:
+        LLVM_VERSION: ${{ inputs.version }}
       run: |
-        wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-        chmod +x /tmp/llvm.sh
-        sudo /tmp/llvm.sh ${{ inputs.version }}
-        # The sanitizer and libFuzzer runtimes live in their own package.
-        sudo apt-get install -y "libclang-rt-${{ inputs.version }}-dev"
-        echo "CC=clang-${{ inputs.version }}" >> "$GITHUB_ENV"
-        clang-${{ inputs.version }} --version | head -1
+        sudo apt-get update -q
+        if ! sudo apt-get install -y -q "clang-$LLVM_VERSION" "libclang-rt-$LLVM_VERSION-dev"; then
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh "$LLVM_VERSION"
+          # The sanitizer and libFuzzer runtimes live in their own package.
+          sudo apt-get install -y "libclang-rt-$LLVM_VERSION-dev"
+        fi
+        echo "CC=clang-$LLVM_VERSION" >> "$GITHUB_ENV"
+        "clang-$LLVM_VERSION" --version | head -1
