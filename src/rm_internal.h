@@ -56,7 +56,7 @@ void* rm_arena_alloc(rm_arena* arena, size_t size);
 void* rm_arena_calloc(rm_arena* arena, size_t count, size_t size);
 
 static inline rm_stroke_point* rm_alloc_stroke_points(rm_arena* arena,
-                                                     size_t count) {
+                                                      size_t count) {
   return rm_arena_calloc(arena, count, sizeof(rm_stroke_point));
 }
 
@@ -459,13 +459,15 @@ rm_status rm_edit_check_ids(const uint8_t* data, size_t size, rm_item_id first,
 rm_status rm_text_check_ids(rm_reader root, rm_item_id first, size_t count);
 rm_status rm_edit_check_location(const uint8_t* data, size_t size,
                                  rm_item_id parent, rm_item_id left,
-                                 rm_item_id right, rm_crdt_id* successor, rm_error* error);
+                                 rm_item_id right, rm_crdt_id* successor,
+                                 rm_error* error);
 static inline rm_status rm_edit_result(rm_error* error, rm_status status) {
   if (error && error->status != status) *error = (rm_error){.status = status};
   return status;
 }
 void rm_edit_forget_previous(struct rm_edit_session* session);
-rm_status rm_edit_commit(struct rm_edit_session* s, uint8_t* bytes, size_t size, rm_error* error);
+rm_status rm_edit_commit(struct rm_edit_session* s, uint8_t* bytes, size_t size,
+                         rm_error* error);
 
 /* Two bytes, little-endian. */
 void rm_write_u16(rm_buf* buf, uint16_t value);

@@ -340,10 +340,13 @@ static void gray_marker_and_masked_eraser(void) {
   rm_draft_stroke stroke = rm_draft_stroke_make(
       RM_TOOL_MASKED_ERASER, RM_COLOR_HIGHLIGHTER_GRAY, &point, 1);
   rm_page_draft draft = {.sheet = {1404, 1872, 1404, 1872},
-                         .column = {936, 1}, .strokes = &stroke, .stroke_count = 1};
+                         .column = {936, 1},
+                         .strokes = &stroke,
+                         .stroke_count = 1};
   uint8_t* bytes = nullptr;
   size_t size = 0;
-  RM_CHECK(rm_write_page(&draft, &bytes, &size, nullptr) == RM_OK, "write stroke");
+  RM_CHECK(rm_write_page(&draft, &bytes, &size, nullptr) == RM_OK,
+           "write stroke");
   page = bytes ? parse(bytes, size) : nullptr;
   RM_CHECK(page && page->stroke_count == 1 &&
                page->strokes[0].color == RM_COLOR_HIGHLIGHTER_GRAY &&
@@ -361,8 +364,9 @@ static void minimum_block_version(void) {
   rm_page* page = nullptr;
   rm_error error;
   RM_CHECK(rm_parse_page(file.bytes, file.count, &page, &error) ==
-               RM_ERR_UNSUPPORTED_BLOCK_VERSION && error.value == 13 &&
-               error.version == 2 && !page, "incompatible SceneInfo");
+                   RM_ERR_UNSUPPORTED_BLOCK_VERSION &&
+               error.value == 13 && error.version == 2 && !page,
+           "incompatible SceneInfo");
   file.bytes[RM_HEADER_LENGTH + 5] = 1;
   RM_CHECK(rm_parse_page(file.bytes, file.count, &page, &error) == RM_OK,
            "compatible extension");
@@ -1129,9 +1133,9 @@ static void text_ties_resume_sibling_branches(void) {
 }
 
 static void transitive_text_neighbours(void) {
-  const record rows[] = {{.id={100,1}, .text="A"},
-                         {.id={200,1}, .right={100,1}, .text="B"},
-                         {.id={300,1}, .right={200,1}, .text="C"}};
+  const record rows[] = {{.id = {100, 1}, .text = "A"},
+                         {.id = {200, 1}, .right = {100, 1}, .text = "B"},
+                         {.id = {300, 1}, .right = {200, 1}, .text = "C"}};
   rm_buf file;
   start_page(&file);
   append_root_text(&file, rows, 3, 936, NAN);
@@ -1140,7 +1144,8 @@ static void transitive_text_neighbours(void) {
   rm_page_free(pg);
   rm_edit_session* s = nullptr;
   RM_CHECK(rm_edit_open(file.bytes, file.count, &s, nullptr) == RM_OK &&
-           rm_edit_replace_text(s, 0, 1, "X", (rm_item_id){1,400}, nullptr) == RM_OK,
+               rm_edit_replace_text(s, 0, 1, "X", (rm_item_id){1, 400},
+                                    nullptr) == RM_OK,
            "replace first scalar of chain");
   size_t size;
   const uint8_t* bytes = rm_edit_bytes(s, &size);

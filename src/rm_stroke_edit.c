@@ -201,7 +201,8 @@ static rm_status rework(rm_edit_session* s, rm_item_id id, rm_item_id fresh,
   /* Anchor every surviving piece between the original tombstone and the
    * next scene item, including erasers and non-stroke children. */
   RM_TRY(rm_edit_check_location(data, size, rm_item_id_of(original.item.parent),
-                                id, (rm_item_id){0}, &original.item.right, error));
+                                id, (rm_item_id){0}, &original.item.right,
+                                error));
   size_t points = rm_reader_remaining(&original.points) / original.stride;
   if (!transform && (first > points || count > points - first))
     return RM_ERR_INVALID_ARGUMENT;

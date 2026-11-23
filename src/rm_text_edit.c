@@ -295,7 +295,8 @@ static rm_status change_root(rm_reader root, size_t start, size_t end,
   rm_idmap_init(&rewritten_rows.style_offsets);
   rm_status status = load_rows(&t, root);
   if (status == RM_OK)
-    status = rewrite_rows(&t, start, end, insertion, fresh, removed, &rewritten_rows);
+    status = rewrite_rows(&t, start, end, insertion, fresh, removed,
+                          &rewritten_rows);
   if (status == RM_OK) {
     rm_buf rows = {0}, items = {0}, lists = {0};
     rm_write_varuint(&rows, rewritten_rows.count);
@@ -344,12 +345,16 @@ static rm_status skip_stat_value(rm_reader* body, uint8_t type) {
   rm_crdt_id id;
   rm_reader block;
   switch (type) {
-    case RM_TAG_ID: return rm_read_bare_crdt(body, &id);
-    case RM_TAG_LENGTH4: return rm_read_subblock(body, &block);
+    case RM_TAG_ID:
+      return rm_read_bare_crdt(body, &id);
+    case RM_TAG_LENGTH4:
+      return rm_read_subblock(body, &block);
     case RM_TAG_BYTE1:
     case RM_TAG_BYTE4:
-    case RM_TAG_BYTE8: return rm_read_bytes(body, type, &bytes);
-    default: return RM_ERR_UNVERIFIED;
+    case RM_TAG_BYTE8:
+      return rm_read_bytes(body, type, &bytes);
+    default:
+      return RM_ERR_UNVERIFIED;
   }
 }
 
@@ -447,7 +452,8 @@ static void empty_root(rm_buf* root, float width) {
 
 static rm_status rewrite_file(rm_reader r, size_t start, size_t end,
                               rm_str insertion, rm_crdt_id fresh,
-                              const rm_buf* expected, rm_idmap* removed, rm_buf* file) {
+                              const rm_buf* expected, rm_idmap* removed,
+                              rm_buf* file) {
   bool found = false;
   column_setting column = {0};
   rm_buf_append(file, r.data, RM_HEADER_LENGTH);
@@ -457,7 +463,7 @@ static rm_status rewrite_file(rm_reader r, size_t start, size_t end,
     RM_TRY(rm_read_block_header(&r, &b));
     rm_reader body = r;
     body.size = b.end;
-    if (b.type == 13) read_column_setting(body,&column);
+    if (b.type == 13) read_column_setting(body, &column);
     if (b.type == 7 || b.type == 10) {
       if (b.type == 7 && found) return RM_ERR_UNVERIFIED;
       rm_buf changed = {0};

@@ -238,8 +238,9 @@ static void marks_author_derived_from(const uint8_t author[16],
  *
  * One writer for both kinds of stroke — the anchored ones differ only in which
  * node they name as their parent. */
-void rm_write_line_item(rm_buf* out, const rm_draft_stroke* stroke, rm_wid parent,
-                      rm_wid id, rm_wid previous, rm_wid right) {
+void rm_write_line_item(rm_buf* out, const rm_draft_stroke* stroke,
+                        rm_wid parent, rm_wid id, rm_wid previous,
+                        rm_wid right) {
   rm_buf value;
   rm_buf_init(&value);
   rm_buf_append_byte(&value, 0x03); /* value type: line */
@@ -459,7 +460,8 @@ static void anchored_mark_blocks(rm_buf* file, const rm_draft_mark* mark,
    * stroke block on a tablet page declares 2 as its minimum too. */
   rm_buf line;
   rm_buf_init(&line);
-  rm_write_line_item(&line, &mark->stroke, ids.node, ids.stroke, ID_NONE, ID_NONE);
+  rm_write_line_item(&line, &mark->stroke, ids.node, ids.stroke, ID_NONE,
+                     ID_NONE);
   rm_write_top_block(file, 0x05, 2, 2, line.bytes, line.count);
   if (line.failed) file->failed = true;
   rm_buf_free(&line);
@@ -1212,7 +1214,7 @@ rm_status rm_write_page(const rm_page_draft* draft, uint8_t** out_bytes,
   for (size_t number = 0; number < draft->stroke_count; number += 1) {
     block.count = 0;
     rm_write_line_item(&block, &draft->strokes[number], ID_LAYER,
-              loose_stroke_id(number), previous, ID_NONE);
+                       loose_stroke_id(number), previous, ID_NONE);
     rm_write_top_block(&file, 0x05, 2, 2, block.bytes, block.count);
     if (block.failed) file.failed = true;
     previous = loose_stroke_id(number);

@@ -1178,9 +1178,11 @@ static void edit_revisions(void) {
   page = parse(at, size);
   RM_CHECK(page && page->stroke_count == 0, "removed layer invisible");
   rm_page_free(page);
-  rm_item_id top={1,500000},middle={1,500010};
-  RM_CHECK(rm_edit_add_layer(session,1,"Top",top,nullptr)==RM_OK,"add top");
-  RM_CHECK(rm_edit_add_layer(session,1,"Middle",middle,nullptr)==RM_OK,"add active middle");
+  rm_item_id top = {1, 500000}, middle = {1, 500010};
+  RM_CHECK(rm_edit_add_layer(session, 1, "Top", top, nullptr) == RM_OK,
+           "add top");
+  RM_CHECK(rm_edit_add_layer(session, 1, "Middle", middle, nullptr) == RM_OK,
+           "add active middle");
   RM_CHECK(rm_edit_delete_layer(session, middle, (rm_item_id){1, 500020},
                                 nullptr) == RM_OK,
            "delete active middle");
@@ -1593,20 +1595,23 @@ static void stroke_replacement_order(void) {
   append_stroke(&page, rm_crdt_of(id), SHOWN, RM_TOOL_FINELINER_2);
   rm_edit_session* s = open_page(&page);
   rm_draft_point pt = rm_draft_point_make(0, 200);
-  rm_draft_stroke stroke = rm_draft_stroke_make(RM_TOOL_ERASER, RM_COLOR_BLACK, &pt, 1);
+  rm_draft_stroke stroke =
+      rm_draft_stroke_make(RM_TOOL_ERASER, RM_COLOR_BLACK, &pt, 1);
   RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(SHOWN), eraser, id,
-                                 (rm_item_id){0}, &stroke, nullptr) == RM_OK, "insert eraser");
+                                 (rm_item_id){0}, &stroke, nullptr) == RM_OK,
+           "insert eraser");
   for (int cut = 0; cut <= 1; cut++) {
-    rm_status status = cut ? rm_edit_cut_stroke(s, id, fresh, 1, 1, nullptr)
-                           : rm_edit_transform_stroke(s, id, fresh,
-                                 (rm_edit_transform){1, 0, 0, 1, 0, 0}, nullptr);
+    rm_status status =
+        cut ? rm_edit_cut_stroke(s, id, fresh, 1, 1, nullptr)
+            : rm_edit_transform_stroke(
+                  s, id, fresh, (rm_edit_transform){1, 0, 0, 1, 0, 0}, nullptr);
     RM_CHECK(status == RM_OK, "replace ink");
     size_t size;
     const uint8_t* bytes = rm_edit_bytes(s, &size);
     rm_page* parsed = parse(bytes, size);
     RM_CHECK(parsed && parsed->stroke_count == 2 &&
-             rm_item_id_equal(parsed->strokes[0].id, fresh) &&
-             rm_item_id_equal(parsed->strokes[1].id, eraser),
+                 rm_item_id_equal(parsed->strokes[0].id, fresh) &&
+                 rm_item_id_equal(parsed->strokes[1].id, eraser),
              "replacement stays below eraser (cut=%d)", cut);
     rm_page_free(parsed);
     RM_CHECK(rm_edit_undo(s), "undo replacement");
@@ -1627,9 +1632,11 @@ static void removed_stroke_parents(void) {
     rm_item_id id = {1, 800 + i}, fresh = {2, 200};
     for (int cut = 0; cut <= 1; cut++) {
       rm_edit_session* s = open_page(&page);
-      rm_status status = cut ? rm_edit_cut_stroke(s, id, fresh, 1, 1, nullptr)
-                             : rm_edit_transform_stroke(s, id, fresh,
-                                   (rm_edit_transform){1, 0, 0, 1, 0, 0}, nullptr);
+      rm_status status =
+          cut ? rm_edit_cut_stroke(s, id, fresh, 1, 1, nullptr)
+              : rm_edit_transform_stroke(s, id, fresh,
+                                         (rm_edit_transform){1, 0, 0, 1, 0, 0},
+                                         nullptr);
       RM_CHECK(status == RM_ERR_ITEMS_NOT_FOUND && !rm_edit_undo(s),
                "removed parent %d, cut=%d", i, cut);
       rm_edit_close(s);
@@ -1677,7 +1684,8 @@ static void historical_active_layers(void) {
   }
   rm_edit_session* s = open_page(&page);
   RM_CHECK(rm_edit_delete_layer(s, rm_item_id_of(SHOWN), (rm_item_id){1, 500},
-                                nullptr) == RM_OK, "delete inactive layer");
+                                nullptr) == RM_OK,
+           "delete inactive layer");
   size_t size;
   const uint8_t* bytes = rm_edit_bytes(s, &size);
   RM_CHECK(size >= page.count && !memcmp(bytes, page.bytes, page.count),
@@ -1699,7 +1707,8 @@ static void interleaved_page_counts(void) {
   }
   append_block(&page, 10, 0, 1, info.bytes, info.count);
   rm_edit_session* s = open_page(&page);
-  RM_CHECK(rm_edit_replace_text(s, 0, 0, "AB", (rm_item_id){1, 400}, nullptr) == RM_OK,
+  RM_CHECK(rm_edit_replace_text(s, 0, 0, "AB", (rm_item_id){1, 400}, nullptr) ==
+               RM_OK,
            "insert text with mixed PageInfo");
   info.bytes[info.count - 9] = 3;
   info.bytes[info.count - 4] = 1;
@@ -1711,7 +1720,8 @@ static void interleaved_page_counts(void) {
   for (size_t i = 0; i < n; i++)
     if (blocks[i].type == 10 && blocks[i].length == info.count)
       matched = !memcmp(blocks[i].body, info.bytes, info.count);
-  RM_CHECK(matched, "mixed PageInfo retains unknown field and updates both counts");
+  RM_CHECK(matched,
+           "mixed PageInfo retains unknown field and updates both counts");
   rm_edit_close(s);
   rm_buf_free(&page);
   rm_buf_free(&info);
@@ -1719,7 +1729,8 @@ static void interleaved_page_counts(void) {
 
 static void stroke_point_allocation_overflow(void) {
   rm_arena* arena = rm_arena_create();
-  RM_CHECK(rm_alloc_stroke_points(arena, SIZE_MAX / sizeof(rm_stroke_point) + 1) == nullptr,
+  RM_CHECK(rm_alloc_stroke_points(
+               arena, SIZE_MAX / sizeof(rm_stroke_point) + 1) == nullptr,
            "reject overflowing stroke point array");
   rm_arena_destroy(arena);
 }

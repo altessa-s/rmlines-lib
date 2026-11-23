@@ -367,7 +367,8 @@ rm_status rm_edit_insert_stroke(rm_edit_session* s, rm_item_id parent,
   if (!found_parent || !found_left || !found_right)
     return report(error, RM_ERR_ITEMS_NOT_FOUND);
 
-  RM_TRY(rm_edit_check_location(r.data, r.size, parent, left, right, nullptr, error));
+  RM_TRY(rm_edit_check_location(r.data, r.size, parent, left, right, nullptr,
+                                error));
   rm_buf payload = {0}, block = {0};
   rm_write_line_item(&payload, stroke, rm_crdt_of(parent), rm_crdt_of(id),
                      rm_crdt_of(left), rm_crdt_of(right));
@@ -543,7 +544,8 @@ static rm_status change_layer(rm_edit_session* s, layer_action action,
   }
   rm_item_id active = node, old_link = {0};
   if (action != ADD_LAYER) old_link = layers[index].link;
-  if (action == DELETE_LAYER) active = layers[index + 1 < count ? index + 1 : index - 1].node;
+  if (action == DELETE_LAYER)
+    active = layers[index + 1 < count ? index + 1 : index - 1].node;
   size_t expected_count = action == ADD_LAYER      ? count + 1
                           : action == DELETE_LAYER ? count - 1
                                                    : count;

@@ -19,8 +19,8 @@
 #include <string.h>
 
 #include "rm_internal.h"
-#include "rmlines/parser.h"
 #include "rmlines/editor.h"
+#include "rmlines/parser.h"
 
 /* ------------------------------------------------------------------ */
 /* The blocks and the fields                                           */
@@ -171,8 +171,6 @@ typedef struct attachment {
   uint8_t key[16];
   rm_str name;
 } attachment;
-
-
 
 /* How many identifiers a record covers: the characters it carries, the ones it
  * deleted, or the single one of a marker. Counted in Unicode scalars, the way
@@ -435,7 +433,7 @@ static rm_pen_tool tool_of(uint32_t raw) {
  * past the end of the palette. */
 static rm_pen_color color_of(uint32_t raw, rm_pen_color fallback) {
   return raw <= (uint32_t)RM_COLOR_HIGHLIGHTER_GRAY ? (rm_pen_color)raw
-                                                      : fallback;
+                                                    : fallback;
 }
 
 /* `end` is the end of the block, and the value has to lie inside it. The
@@ -658,8 +656,8 @@ typedef struct tree_node {
 /* One scene tree node's own identifier, anchor and visibility, read field by
  * field so that a field of an unknown shape ends the node rather than the
  * block. */
-static rm_status parse_tree_node(rm_reader* reader, size_t end,
-                                 tree_node* out, rm_anchor_field* location) {
+static rm_status parse_tree_node(rm_reader* reader, size_t end, tree_node* out,
+                                 rm_anchor_field* location) {
   *out = (tree_node){0};
   RM_TRY(rm_read_crdt(reader, 1, &out->id));
 
@@ -831,9 +829,10 @@ static void parse_scene_info(parse_ctx* ctx, rm_reader* reader, size_t end) {
     } else if (index == TAG_CANVAS_SIZE || index == TAG_STAMPED_SHEET_SIZE) {
       rm_crdt_id stamp = RM_CRDT_NONE;
       rm_reader dimensions = *reader;
-      if (index == TAG_STAMPED_SHEET_SIZE && (rm_read_crdt(reader, 1, &stamp) != RM_OK ||
-                         !rm_match_tag(reader, 2, RM_TAG_LENGTH4) ||
-                         rm_read_subblock(reader, &dimensions) != RM_OK)) {
+      if (index == TAG_STAMPED_SHEET_SIZE &&
+          (rm_read_crdt(reader, 1, &stamp) != RM_OK ||
+           !rm_match_tag(reader, 2, RM_TAG_LENGTH4) ||
+           rm_read_subblock(reader, &dimensions) != RM_OK)) {
         reader = outer;
         continue;
       }
@@ -843,7 +842,8 @@ static void parse_scene_info(parse_ctx* ctx, rm_reader* reader, size_t end) {
           isfinite(height) && width > 0 && height > 0) {
         canvas = (rm_size){.width = width, .height = height};
         has_canvas = true;
-        if (index == TAG_STAMPED_SHEET_SIZE && !rm_stamp_newer(ctx->sheet_stamp, stamp)) {
+        if (index == TAG_STAMPED_SHEET_SIZE &&
+            !rm_stamp_newer(ctx->sheet_stamp, stamp)) {
           ctx->has_stamped_sheet = ctx->has_paper_size = true;
           ctx->sheet_stamp = stamp;
           ctx->paper_size = canvas;
@@ -1669,7 +1669,7 @@ done:
 /* First walk the left-linked branches to get the reading order of ties.
  * Then impose every explicit neighbour dependency on that sequence. */
 bool rm_text_record_order(const text_item* items, size_t count,
-                              uint32_t** out_order) {
+                          uint32_t** out_order) {
   *out_order = nullptr;
   if (count == 0) return true;
 
@@ -2213,7 +2213,8 @@ static uint32_t* chain_order(const uint32_t* indices, size_t count,
   uint32_t* result = calloc(count == 0 ? 1 : count, sizeof *result);
   if (result == nullptr) return nullptr;
   /* Unlinked placements follow all sequence items in placement-record order.
-   * They have no sequence IDs and cannot participate in neighbour resolution. */
+   * They have no sequence IDs and cannot participate in neighbour resolution.
+   */
   while (count && items[indices[count - 1]].placement_only) {
     --count;
     result[count] = indices[count];
@@ -2848,14 +2849,13 @@ static rm_status assemble(parse_ctx* ctx, rm_page* page) {
 
   rm_highlight* out_highlights = nullptr;
   if (glyphs.count != 0) {
-    out_highlights = rm_arena_alloc(
-        ctx->arena, glyphs.count * sizeof *out_highlights);
+    out_highlights =
+        rm_arena_alloc(ctx->arena, glyphs.count * sizeof *out_highlights);
     if (out_highlights == nullptr) {
       status = RM_ERR_OUT_OF_MEMORY;
       goto done;
     }
-    memcpy(out_highlights, glyphs.data,
-           glyphs.count * sizeof *out_highlights);
+    memcpy(out_highlights, glyphs.data, glyphs.count * sizeof *out_highlights);
   }
 
   *page = (rm_page){
@@ -2963,10 +2963,12 @@ static rm_status parse_blocks(parse_ctx* ctx, rm_error* error) {
         block.min_version > supported[block_type]) {
       if (error) {
         *error = (rm_error){.status = RM_ERR_UNSUPPORTED_BLOCK_VERSION,
-                            .value = block_type, .version = block.min_version};
+                            .value = block_type,
+                            .version = block.min_version};
         snprintf(error->message, sizeof error->message,
                  "block 0x%02x at offset %zu requires reader %u (supported %u)",
-                 block_type, block.start, block.min_version, supported[block_type]);
+                 block_type, block.start, block.min_version,
+                 supported[block_type]);
       }
       return RM_ERR_UNSUPPORTED_BLOCK_VERSION;
     }
@@ -2978,8 +2980,9 @@ static rm_status parse_blocks(parse_ctx* ctx, rm_error* error) {
         /* A stroke we did not understand is a lost piece of the
          * drawing, but no reason to lose the whole page. */
         scene_item item;
-        rm_status status =
-            parse_line_item(ctx, &inner, current_version > 2 ? 2 : current_version, block_end, &item);
+        rm_status status = parse_line_item(
+            ctx, &inner, current_version > 2 ? 2 : current_version, block_end,
+            &item);
         if (status == RM_OK) {
           if (item.kind == ITEM_TOMBSTONE) ctx->deleted_items += 1;
           if (!rm_vec_push(&ctx->items, &item)) return RM_ERR_OUT_OF_MEMORY;
@@ -3314,7 +3317,8 @@ rm_status rm_text_check_ids(rm_reader root, rm_item_id first, size_t count) {
 
 rm_status rm_edit_check_location(const uint8_t* data, size_t size,
                                  rm_item_id parent, rm_item_id left,
-                                 rm_item_id right, rm_crdt_id* successor, rm_error* error) {
+                                 rm_item_id right, rm_crdt_id* successor,
+                                 rm_error* error) {
   parse_ctx ctx;
   RM_TRY(read_blocks(data, size, &ctx, error));
   const scene_item* items = ctx.items.data;
@@ -3607,7 +3611,8 @@ rm_status rm_scan_highlighter_items(const uint8_t* data, size_t size,
       goto done;
   }
   for (size_t i = 0; i < ctx.items.count; i += 1) {
-    if (items[i].kind != ITEM_GLYPH || rm_idmap_contains(removed, items[i].parent))
+    if (items[i].kind != ITEM_GLYPH ||
+        rm_idmap_contains(removed, items[i].parent))
       continue;
     const rm_highlight* highlight = &items[i].glyph;
     rm_crdt_id key = rm_crdt_of(highlight->id);
