@@ -42,7 +42,10 @@ set(RMLINES_SOURCES
     src/rm_model.c
     src/rm_parser.c
     src/rm_writer.c
-    src/rm_editor.c)
+    src/rm_editor.c
+    src/rm_session.c
+    src/rm_text_edit.c
+    src/rm_stroke_edit.c)
 
 set(RMLINES_PUBLIC_HEADERS
     include/rmlines/rmlines.h

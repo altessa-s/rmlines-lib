@@ -11,6 +11,7 @@
 #include <float.h>
 #include <math.h>
 
+#include "rm_damaged.h"
 #include "rm_internal.h"
 #include "rm_test.h"
 #include "rmlines/rmlines.h"
@@ -44,6 +45,7 @@ typedef struct record {
   uint32_t overclaim;
   const uint8_t* trailing;
   size_t trailing_count;
+  rm_crdt_id right;
 } record;
 
 /* The root text block: the records, the box, the legacy width and — when
@@ -62,7 +64,7 @@ static void append_root_text_declaring(rm_buf* page, const record* records,
     }
     rm_write_id(&item, 2, records[i].id);
     rm_write_id(&item, 3, records[i].left);
-    rm_write_id(&item, 4, RM_CRDT_NONE);
+    rm_write_id(&item, 4, records[i].right);
     rm_write_tag(&item, 5, RM_TAG_BYTE4);
     rm_write_u32(&item, records[i].deleted);
     rm_write_tag(&item, 6, RM_TAG_LENGTH4);
@@ -326,6 +328,50 @@ static void the_highlighters_blue_and_orange_read_under_their_own_indexes(
            "the orange reads back as itself");
   rm_page_free(written);
   rm_bytes_free(bytes);
+}
+
+static void gray_marker_and_masked_eraser(void) {
+  rm_page* page = glyph_page(16, true, false, 0);
+  RM_CHECK(page && page->highlight_count == 1 &&
+               page->highlights[0].color == RM_COLOR_HIGHLIGHTER_GRAY,
+           "index 16 is the gray text highlight");
+  rm_page_free(page);
+  rm_draft_point point = rm_draft_point_make(3, 4);
+  rm_draft_stroke stroke = rm_draft_stroke_make(
+      RM_TOOL_MASKED_ERASER, RM_COLOR_HIGHLIGHTER_GRAY, &point, 1);
+  rm_page_draft draft = {.sheet = {1404, 1872, 1404, 1872},
+                         .column = {936, 1},
+                         .strokes = &stroke,
+                         .stroke_count = 1};
+  uint8_t* bytes = nullptr;
+  size_t size = 0;
+  RM_CHECK(rm_write_page(&draft, &bytes, &size, nullptr) == RM_OK,
+           "write stroke");
+  page = bytes ? parse(bytes, size) : nullptr;
+  RM_CHECK(page && page->stroke_count == 1 &&
+               page->strokes[0].color == RM_COLOR_HIGHLIGHTER_GRAY &&
+               page->strokes[0].tool == RM_TOOL_MASKED_ERASER &&
+               rm_pen_tool_is_eraser(page->strokes[0].tool),
+           "tool 22 round-trips as an eraser");
+  rm_page_free(page);
+  rm_bytes_free(bytes);
+}
+
+static void minimum_block_version(void) {
+  rm_buf file;
+  start_page(&file);
+  rm_write_top_block(&file, 13, 2, 2, nullptr, 0);
+  rm_page* page = nullptr;
+  rm_error error;
+  RM_CHECK(rm_parse_page(file.bytes, file.count, &page, &error) ==
+                   RM_ERR_UNSUPPORTED_BLOCK_VERSION &&
+               error.value == 13 && error.version == 2 && !page,
+           "incompatible SceneInfo");
+  file.bytes[RM_HEADER_LENGTH + 5] = 1;
+  RM_CHECK(rm_parse_page(file.bytes, file.count, &page, &error) == RM_OK,
+           "compatible extension");
+  rm_page_free(page);
+  rm_buf_free(&file);
 }
 
 static void a_nested_ticked_checkbox_is_a_checkbox_item_and_keeps_its_level(
@@ -1073,7 +1119,498 @@ static void a_ballpoint_stroke_keeps_the_pens_speed(void) {
   rm_page_free(page);
 }
 
+static void text_ties_resume_sibling_branches(void) {
+  const record rows[] = {
+      {.id = {20, 1}, .text = "Hello "},
+      {.id = {26, 1}, .left = {25, 1}, .text = "world"},
+      {.id = {100, 1}, .left = {25, 1}, .right = {26, 1}, .text = "brave "},
+      {.id = {200, 1}, .right = {20, 1}, .text = "Oh, "},
+  };
+  rm_page* page = text_page(rows, 4, 936, NAN);
+  expect_lines(page, (const char* const[]){"Oh, Hello brave world"}, 1,
+               "nested text ties");
+  rm_page_free(page);
+}
+
+static void transitive_text_neighbours(void) {
+  const record rows[] = {{.id = {100, 1}, .text = "A"},
+                         {.id = {200, 1}, .right = {100, 1}, .text = "B"},
+                         {.id = {300, 1}, .right = {200, 1}, .text = "C"}};
+  rm_buf file;
+  start_page(&file);
+  append_root_text(&file, rows, 3, 936, NAN);
+  rm_page* pg = parse(file.bytes, file.count);
+  expect_lines(pg, (const char* const[]){"CBA"}, 1, "right chain");
+  rm_page_free(pg);
+  rm_edit_session* s = nullptr;
+  RM_CHECK(rm_edit_open(file.bytes, file.count, &s, nullptr) == RM_OK &&
+               rm_edit_replace_text(s, 0, 1, "X", (rm_item_id){1, 400},
+                                    nullptr) == RM_OK,
+           "replace first scalar of chain");
+  size_t size;
+  const uint8_t* bytes = rm_edit_bytes(s, &size);
+  pg = parse(bytes, size);
+  expect_lines(pg, (const char* const[]){"XBA"}, 1, "edited right chain");
+  rm_page_free(pg);
+  rm_edit_close(s);
+  rm_buf_free(&file);
+}
+
+static void text_neighbours_across_left_groups(void) {
+  const record rows[] = {
+      {.id = {100, 1}, .text = "A"},
+      {.id = {200, 1}, .text = "B"},
+      {.id = {300, 1}, .left = {200, 1}, .right = {100, 1}, .text = "C"}};
+  rm_buf file;
+  start_page(&file);
+  append_root_text(&file, rows, 3, 936, NAN);
+  rm_page* pg = parse(file.bytes, file.count);
+  expect_lines(pg, (const char* const[]){"BCA"}, 1, "cross-group neighbours");
+  rm_page_free(pg);
+  rm_edit_session* s = nullptr;
+  RM_CHECK(rm_edit_open(file.bytes, file.count, &s, nullptr) == RM_OK &&
+               rm_edit_replace_text(s, 0, 1, "X", (rm_item_id){1, 400},
+                                    nullptr) == RM_OK,
+           "replace first scalar of chain");
+  size_t size;
+  const uint8_t* bytes = rm_edit_bytes(s, &size);
+  pg = parse(bytes, size);
+  expect_lines(pg, (const char* const[]){"XCA"}, 1,
+               "edited cross-group neighbours");
+  rm_page_free(pg);
+  rm_edit_close(s);
+  rm_buf_free(&file);
+}
+
+static rm_page* session_page(rm_edit_session* session) {
+  size_t size;
+  const uint8_t* data = rm_edit_bytes(session, &size);
+  return parse(data, size);
+}
+
+static void interior_neighbours_order_scalar_edits(void) {
+  record rows[] = {
+      {.id = {100, 1}, .text = "ABCD"},
+      {.id = {200, 1}, .left = {101, 1}, .right = {102, 1}, .text = "X"}};
+  rm_buf b;
+  start_page(&b);
+  append_root_text(&b, rows, 2, 936, NAN);
+  rm_edit_session* session = nullptr;
+  RM_CHECK(rm_edit_open(b.bytes, b.count, &session, nullptr) == RM_OK, "open");
+  rm_page* p = session_page(session);
+  expect_lines(p, (const char*[]){"ABXCD"}, 1, "interior insertion");
+  rm_page_free(p);
+  RM_CHECK(rm_edit_replace_text(session, 4, 1, "", (rm_item_id){1, 901},
+                                nullptr) == RM_OK,
+           "remove D");
+  p = session_page(session);
+  expect_lines(p, (const char*[]){"ABXC"}, 1, "remove last scalar");
+  rm_page_free(p);
+  rm_edit_close(session);
+  rm_buf_free(&b);
+}
+
+static void anchor_registers_follow_independent_stamps(void) {
+  for (int reverse = 0; reverse < 2; reverse++) {
+    rm_buf b;
+    start_page(&b);
+    record row = {.id = {100, 1}, .text = "ABC"};
+    append_root_text(&b, &row, 1, 936, NAN);
+    append_layer(&b);
+    rm_crdt_id node = {41, 1};
+    for (int j = 0; j < 2; j++) {
+      bool newer = (j == reverse);
+      rm_buf state = {0}, target = {0};
+      rm_write_id(&state, 1, node);
+      rm_write_id(&target, 1, rm_crdt_make(1, newer ? 142 : 120));
+      rm_write_id(&target, 2, rm_crdt_make(1, newer ? 102 : 100));
+      rm_write_block(&state, 7, target.bytes, target.count);
+      rm_write_stamped_f32(&state, 10, rm_crdt_make(1, newer ? 121 : 143),
+                           newer ? 5 : 9);
+      rm_write_top_block(&b, 2, 1, 1, state.bytes, state.count);
+      rm_buf_free(&state);
+      rm_buf_free(&target);
+    }
+    uint8_t point[14] = {0};
+    append_one_point_stroke(&b, 2, node, (rm_crdt_id){43, 1}, point, 14,
+                            nullptr, 0);
+    rm_edit_session* s = nullptr;
+    RM_CHECK(rm_edit_open(b.bytes, b.count, &s, nullptr) == RM_OK, "open");
+    for (int step = 0; step < 2; step++) {
+      rm_page* p = session_page(s);
+      RM_CHECK(p && !p->skipped_blocks && p->anchored_strokes == 1 &&
+                   p->strokes[0].anchor.offset == 3,
+               "winning character");
+      RM_CHECK(p && p->stroke_count == 1 && p->strokes[0].anchor.has_origin_x &&
+                   p->strokes[0].anchor.origin_x == 9,
+               "winning horizontal");
+      rm_page_free(p);
+      if (!step)
+        RM_CHECK(rm_edit_replace_text(s, 2, 1, "Q", (rm_item_id){1, 901},
+                                      nullptr) == RM_OK,
+                 "replace C");
+    }
+    RM_CHECK(rm_edit_replace_text(s, 0, 1, "", (rm_item_id){1, 902}, nullptr) ==
+                 RM_OK,
+             "stale anchor permits deletion");
+    rm_edit_close(s);
+    rm_buf_free(&b);
+  }
+}
+
+static void unlinked_children_inherit_layer_visibility(void) {
+  for (int image = 0; image < 2; image++) {
+    char path[1024];
+    rm_test_fixture_path(path, sizeof path, "Wikipedia_highlighted_p1.rm");
+    size_t size;
+    uint8_t* data =
+        image ? rm_damaged_image_page(&size) : rm_test_read_file(path, &size);
+    RM_CHECK(data, "load fixture");
+    if (!data) continue;
+    rm_buf b, event = {0}, parent_field = {0};
+    start_page(&b);
+    rm_reader in = {.data = data, .size = size, .offset = RM_HEADER_LENGTH};
+    rm_crdt_id child = {110, 1}, parent = {0};
+    while (rm_reader_remaining(&in) >= 8) {
+      rm_block_header h;
+      if (rm_read_block_header(&in, &h) != RM_OK) break;
+      if (h.type == (image ? 15 : 3)) {
+        rm_reader body = in;
+        body.size = h.end;
+        RM_CHECK(rm_read_crdt(&body, 1, &parent) == RM_OK, "content parent");
+        rm_buf moved = {0};
+        rm_write_id(&moved, 1, child);
+        rm_buf_append(&moved, data + body.offset, h.end - body.offset);
+        rm_write_u32(&b, (uint32_t)moved.count);
+        rm_buf_append(&b, data + h.start + 4, 4);
+        rm_buf_append(&b, moved.bytes, moved.count);
+        rm_buf_free(&moved);
+      } else
+        rm_buf_append(&b, data + h.start, h.end - h.start);
+      in.offset = h.end;
+    }
+    rm_write_id(&event, 1, child);
+    rm_write_id(&event, 2, RM_CRDT_NONE);
+    rm_write_tag(&event, 3, RM_TAG_BYTE1);
+    rm_buf_append_byte(&event, 1);
+    rm_write_id(&parent_field, 1, parent);
+    rm_write_block(&event, 4, parent_field.bytes, parent_field.count);
+    rm_write_top_block(&b, 1, 1, 1, event.bytes, event.count);
+    rm_edit_session* s = nullptr;
+    RM_CHECK(rm_edit_open(b.bytes, b.count, &s, nullptr) == RM_OK, "open");
+    for (int stage = 0; stage < 3; stage++) {
+      rm_page* p = session_page(s);
+      RM_CHECK(
+          p && !p->skipped_blocks &&
+              p->highlight_count == (size_t)(!image && stage != 1 ? 4 : 0) &&
+              p->image_count == (size_t)(image && stage != 1),
+          "visibility at stage %d", stage);
+      rm_page_free(p);
+      if (stage == 0)
+        RM_CHECK(rm_edit_set_node_visible(s, rm_item_id_of(parent),
+                                          (rm_item_id){1, 900100}, false,
+                                          nullptr) == RM_OK,
+                 "hide layer");
+      if (stage == 1) RM_CHECK(rm_edit_undo(s), "undo hide");
+    }
+    rm_edit_close(s);
+    rm_buf_free(&event);
+    rm_buf_free(&parent_field);
+    rm_buf_free(&b);
+    free(data);
+  }
+}
+
+static void scene_preferences_follow_stamps(void) {
+  rm_buf b;
+  start_page(&b);
+  for (int i = 0; i < 2; i++) {
+    rm_crdt_id stamp = rm_crdt_make(1, 50 - i);
+    uint8_t setting = i ? 0 : 2;
+    rm_buf scene = {0};
+    rm_write_stamped_u8(&scene, 2, stamp, i);
+    rm_write_stamped_u8(&scene, 3, stamp, i);
+    rm_write_stamped_block(&scene, 9, stamp, &setting, 1);
+    rm_write_top_block(&b, 13, 1, 1, scene.bytes, scene.count);
+    rm_buf_free(&scene);
+  }
+  rm_edit_session* s = nullptr;
+  RM_CHECK(rm_edit_open(b.bytes, b.count, &s, nullptr) == RM_OK, "open scene");
+  RM_CHECK(rm_edit_replace_text(s, 0, 0, "X", (rm_item_id){1, 901}, nullptr) ==
+               RM_OK,
+           "create root");
+  rm_page* p = session_page(s);
+  RM_CHECK(p && !p->background_visible, "template register");
+  RM_CHECK(p && !p->root_document_visible, "document register");
+  RM_CHECK(p && p->text.column_width == rm_text_column_width(RM_COLUMN_WIDE),
+           "column register");
+  rm_page_free(p);
+  rm_edit_close(s);
+  rm_buf_free(&b);
+}
+
+static void preferred_layout_defaults_follow_the_winning_mode(void) {
+  for (int mode = 0; mode < 3; mode++) {
+    rm_buf b, info = {0}, screen = {0};
+    start_page(&b);
+    rm_write_u32(&screen, 1600);
+    rm_write_u32(&screen, 2000);
+    rm_write_block(&info, 5, screen.bytes, screen.count);
+    uint8_t setting = mode == 0 ? 0 : mode == 1 ? 3 : 4;
+    rm_write_stamped_block(&info, 9, mode ? rm_crdt_make(1, 100) : RM_CRDT_NONE,
+                           &setting, 1);
+    rm_write_top_block(&b, 13, 1, 1, info.bytes, info.count);
+    if (mode) {
+      info.count = 0;
+      setting = 0;
+      rm_write_stamped_block(&info, 9, rm_crdt_make(1, 50), &setting, 1);
+      rm_write_top_block(&b, 13, 1, 1, info.bytes, info.count);
+    }
+    rm_edit_session* s = nullptr;
+    RM_CHECK(rm_edit_open(b.bytes, b.count, &s, nullptr) == RM_OK,
+             "open scene");
+    RM_CHECK(rm_edit_replace_text(s, 0, 0, "X", (rm_item_id){1, 901},
+                                  nullptr) == RM_OK,
+             "create root");
+    rm_page* p = session_page(s);
+    RM_CHECK(p && p->text.column_width == (mode == 2 ? 1152 : 936),
+             "preferred layout mode %d", mode);
+    rm_page_free(p);
+    rm_edit_close(s);
+    rm_buf_free(&screen);
+    rm_buf_free(&info);
+    rm_buf_free(&b);
+  }
+}
+
+static void attachment_name_follows_stamp(void) {
+  size_t n;
+  uint8_t* data = rm_damaged_image_page(&n);
+  rm_buf b = {0}, name = {0}, row = {0}, rows = {0}, map = {0};
+  rm_buf_append(&b, data, n);
+  for (uint8_t i = 0; i < 16; i++) rm_buf_append_byte(&row, i);
+  rm_write_string(&name, "stale.png");
+  rm_write_stamped_block(&row, 1, rm_crdt_make(1, 1), name.bytes, name.count);
+  rm_write_varuint(&rows, 1);
+  rm_write_block(&rows, 0, row.bytes, row.count);
+  rm_write_block(&map, 1, rows.bytes, rows.count);
+  rm_write_top_block(&b, 14, 1, 1, map.bytes, map.count);
+  rm_page* p = parse(b.bytes, b.count);
+  RM_CHECK(p && p->image_count == 1, "image");
+  if (p && p->image_count)
+    RM_CHECK_EQ_STR(p->images[0].file.bytes, p->images[0].file.length,
+                    "0a418e1a-1111-4222-8333-444455556666.png",
+                    "attachment name");
+  rm_page_free(p);
+  free(data);
+  rm_buf_free(&b);
+  rm_buf_free(&name);
+  rm_buf_free(&row);
+  rm_buf_free(&rows);
+  rm_buf_free(&map);
+}
+
+static void paragraph_style_and_width_follow_stamps(void) {
+  rm_buf b, root = {0}, lists = {0}, entries = {0}, styles = {0},
+            position = {0};
+  start_page(&b);
+  rm_write_varuint(&entries, 2);
+  rm_write_id(&root, 1, RM_CRDT_NONE);
+  for (int i = 0; i < 2; i++) {
+    rm_crdt_id stamp = rm_crdt_make(1, 20 - i);
+    uint8_t format[] = {0x11, (uint8_t)(i ? 1 : 3)};
+    rm_write_bare_id(&entries, RM_CRDT_NONE);
+    rm_write_id(&entries, 1, stamp);
+    rm_write_block(&entries, 2, format, sizeof format);
+    rm_buf settings = {0};
+    rm_write_stamped_f32(&settings, 1, stamp, i ? 740 : 1152);
+    rm_write_block(&root, 5, settings.bytes, settings.count);
+    rm_buf_free(&settings);
+  }
+  rm_write_block(&styles, 1, entries.bytes, entries.count);
+  rm_write_block(&lists, 2, styles.bytes, styles.count);
+  rm_write_block(&root, 2, lists.bytes, lists.count);
+  rm_write_f64(&position, 0);
+  rm_write_f64(&position, 0);
+  rm_write_block(&root, 3, position.bytes, position.count);
+  rm_write_top_block(&b, 7, 1, 1, root.bytes, root.count);
+  rm_page* p = parse(b.bytes, b.count);
+  RM_CHECK(p && p->has_text && p->text.paragraphs[0].format.raw == 3,
+           "style stamp");
+  RM_CHECK(p && p->has_text && p->text.column_width == 1152, "width stamp");
+  rm_page_free(p);
+  rm_buf_free(&b);
+  rm_buf_free(&root);
+  rm_buf_free(&lists);
+  rm_buf_free(&entries);
+  rm_buf_free(&styles);
+  rm_buf_free(&position);
+}
+
+static void append_ordered_stroke(rm_buf* page, uint64_t id, uint64_t left,
+                                  uint64_t right) {
+  rm_draft_point point = rm_draft_point_make(0, 0);
+  rm_draft_stroke stroke = {
+      .points = &point, .point_count = 1, .tool = RM_TOOL_FINELINER_2};
+  rm_buf body = {0};
+  rm_write_line_item(&body, &stroke, LAYER, rm_crdt_make(1, id),
+                     left ? rm_crdt_make(1, left) : RM_CRDT_NONE,
+                     right ? rm_crdt_make(1, right) : RM_CRDT_NONE);
+  rm_write_top_block(page, 5, 2, 2, body.bytes, body.count);
+  rm_buf_free(&body);
+}
+
+static void scene_neighbours_inside_deleted_ranges(void) {
+  rm_buf b, tomb = {0};
+  start_page(&b);
+  append_ordered_stroke(&b, 200, 102, 0);
+  append_ordered_stroke(&b, 201, 101, 102);
+  rm_write_id(&tomb, 1, LAYER);
+  rm_write_id(&tomb, 2, rm_crdt_make(1, 100));
+  rm_write_id(&tomb, 3, RM_CRDT_NONE);
+  rm_write_id(&tomb, 4, RM_CRDT_NONE);
+  rm_write_tag(&tomb, 5, RM_TAG_BYTE4);
+  rm_write_u32(&tomb, 4);
+  rm_write_top_block(&b, 8, 1, 1, tomb.bytes, tomb.count);
+  rm_page* p = parse(b.bytes, b.count);
+  RM_CHECK(p && p->stroke_count == 2 && p->strokes[0].id.counter == 201,
+           "stroke between deleted positions precedes the later stroke");
+  rm_page_free(p);
+  /* Two siblings tied at the last ID of an unsplit tombstone. */
+  b.count = RM_HEADER_LENGTH;
+  rm_write_top_block(&b, 8, 1, 1, tomb.bytes, tomb.count);
+  append_ordered_stroke(&b, 200, 103, 0);
+  append_ordered_stroke(&b, 201, 103, 0);
+  p = parse(b.bytes, b.count);
+  RM_CHECK(p && p->stroke_count == 2 && p->strokes[0].id.counter == 201,
+           "siblings after a compact tombstone retain the scene tie-break");
+  rm_page_free(p);
+  rm_buf_free(&b);
+  rm_buf_free(&tomb);
+}
+
+static void disconnected_scene_chains_honor_known_neighbours(void) {
+  rm_buf b;
+  start_page(&b);
+  append_ordered_stroke(&b, 200, 201, 0);
+  append_ordered_stroke(&b, 201, 99, 0);
+  rm_page* p = parse(b.bytes, b.count);
+  RM_CHECK(p && p->stroke_count == 2 && p->strokes[0].id.counter == 201,
+           "known left dependency in a disconnected chain");
+  rm_page_free(p);
+  rm_buf_free(&b);
+}
+
+static void stamped_sheet_size_overrides_legacy_size(void) {
+  rm_buf b;
+  start_page(&b);
+  for (int i = 0; i < 2; i++) {
+    rm_buf scene = {0}, size = {0};
+    rm_write_f64(&size, 100);
+    rm_write_f64(&size, 200);
+    rm_write_block(&scene, 7, size.bytes, size.count);
+    size.count = 0;
+    rm_write_f64(&size, i ? 400 : 800);
+    rm_write_f64(&size, i ? 600 : 1200);
+    rm_write_stamped_block(&scene, 8, rm_crdt_make(1, 20 - i), size.bytes,
+                           size.count);
+    rm_write_top_block(&b, 13, 1, 1, scene.bytes, scene.count);
+    rm_buf_free(&scene);
+    rm_buf_free(&size);
+  }
+  rm_page* p = parse(b.bytes, b.count);
+  RM_CHECK(p && p->has_paper_size && p->paper_size.width == 800 &&
+               p->paper_size.height == 1200,
+           "authoritative sheet size");
+  rm_page_free(p);
+  rm_buf_free(&b);
+}
+
+static void stale_group_links_do_not_discard_sibling_order(void) {
+  rm_buf b, event = {0}, placement = {0};
+  start_page(&b);
+  append_ordered_stroke(&b, 200, 201, 0);
+  append_ordered_stroke(&b, 201, 0, 0);
+  append_anchored_node(&b, LAYER, rm_crdt_make(1, 52), RM_CRDT_NONE);
+  rm_write_id(&event, 1, LAYER);
+  rm_write_id(&event, 2, RM_CRDT_NONE);
+  rm_write_tag(&event, 3, RM_TAG_BYTE1);
+  rm_buf_append_byte(&event, 1);
+  rm_write_id(&placement, 1, rm_crdt_make(0, 1));
+  rm_write_block(&event, 4, placement.bytes, placement.count);
+  rm_write_top_block(&b, 1, 1, 1, event.bytes, event.count);
+  rm_page* p = parse(b.bytes, b.count);
+  RM_CHECK(
+      p && p->stroke_count == 2 && p->strokes[0].id.counter == 201,
+      "stale group link cannot make ordered strokes fall back to file order");
+  rm_page_free(p);
+  rm_edit_session* session = nullptr;
+  RM_CHECK(rm_edit_open(b.bytes, b.count, &session, nullptr) == RM_OK,
+           "open stale link");
+  rm_draft_point point = rm_draft_point_make(0, 0);
+  rm_draft_stroke stroke = {
+      .tool = RM_TOOL_FINELINER_2, .points = &point, .point_count = 1};
+  RM_CHECK(
+      rm_edit_insert_stroke(session, rm_item_id_of(LAYER), (rm_item_id){1, 300},
+                            (rm_item_id){1, 52}, (rm_item_id){0}, &stroke,
+                            nullptr) == RM_ERR_ITEMS_NOT_FOUND,
+      "a moved group's stale link is not a live insertion neighbour");
+  rm_edit_close(session);
+  rm_buf_free(&b);
+  rm_buf_free(&event);
+  rm_buf_free(&placement);
+}
+
+static void repeated_node_fields_use_the_winning_stamp(void) {
+  for (int order = 0; order < 2; order++) {
+    rm_buf b, state = {0};
+    start_page(&b);
+    append_layer(&b);
+    rm_write_id(&state, 1, LAYER);
+    for (int i = 0; i < 2; i++) {
+      bool latest = i == order;
+      rm_write_stamped_u8(&state, 3, rm_crdt_make(1, latest ? 30 : 20),
+                          !latest);
+    }
+    rm_write_top_block(&b, 2, 1, 1, state.bytes, state.count);
+    rm_edit_session* s = nullptr;
+    RM_CHECK(rm_edit_open(b.bytes, b.count, &s, nullptr) == RM_OK, "open");
+    rm_edit_layer* layers = nullptr;
+    size_t count = 0;
+    RM_CHECK(rm_edit_layers(s, &layers, &count, nullptr) == RM_OK &&
+                 count == 1 && !layers[0].visible,
+             "newest visibility hides layer");
+    rm_edit_layers_free(layers);
+    RM_CHECK(
+        rm_edit_set_node_visible(s, rm_item_id_of(LAYER), (rm_item_id){1, 25},
+                                 true, nullptr) == RM_ERR_INVALID_ARGUMENT,
+        "stale edit refused in both field orders");
+    rm_edit_close(s);
+    rm_buf_free(&b);
+    rm_buf_free(&state);
+  }
+}
+
 int main(void) {
+  repeated_node_fields_use_the_winning_stamp();
+  stale_group_links_do_not_discard_sibling_order();
+  scene_neighbours_inside_deleted_ranges();
+  disconnected_scene_chains_honor_known_neighbours();
+  stamped_sheet_size_overrides_legacy_size();
+
+  interior_neighbours_order_scalar_edits();
+  anchor_registers_follow_independent_stamps();
+  unlinked_children_inherit_layer_visibility();
+  scene_preferences_follow_stamps();
+  preferred_layout_defaults_follow_the_winning_mode();
+  attachment_name_follows_stamp();
+  paragraph_style_and_width_follow_stamps();
+
+  text_neighbours_across_left_groups();
+  transitive_text_neighbours();
+  text_ties_resume_sibling_branches();
+  gray_marker_and_masked_eraser();
+  minimum_block_version();
   link_markers_are_not_text();
   an_inline_image_is_one_object_replacement_character();
   a_code_of_nought_is_plain_text();
