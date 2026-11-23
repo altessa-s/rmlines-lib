@@ -76,6 +76,8 @@ static const char* tool_name(rm_pen_tool tool) {
       return "highlighter2";
     case RM_TOOL_CALIGRAPHY:
       return "caligraphy";
+    case RM_TOOL_MASKED_ERASER:
+      return "maskedEraser";
     case RM_TOOL_SHADER:
       return "shader";
   }

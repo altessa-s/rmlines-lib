@@ -185,7 +185,8 @@ static void a_tombstone_before_a_108_byte_block_is_a_tombstone(void) {
     rm_buf page, body = {0};
     start_page(&page);
     append_raw_preamble(&body, 20, 1);
-    append_block(&page, types[i], 2, 2, body.bytes, body.count);
+    uint8_t version = types[i] == 5 ? 2 : 1;
+    append_block(&page, types[i], version, version, body.bytes, body.count);
     /* The page counters: stepped over by length, never counted. */
     append_zeros_block(&page, 0x0A, 108);
     rm_page* parsed = parse(page.bytes, page.count);
@@ -1000,7 +1001,1000 @@ static void highlights_over_a_text_layer_are_found_with_the_strokes(void) {
   free(data);
 }
 
+/* Inspect the serialized registers, which the public page model omits. */
+static bool line_has_move_only(const block_view* block, rm_item_id expected) {
+  rm_reader body = {.data = block->body, .size = block->length}, value, points;
+  rm_item_preamble it;
+  if (rm_parse_item_preamble(&body, &it) != RM_OK || it.deleted ||
+      !rm_match_tag(&body, 6, RM_TAG_LENGTH4) ||
+      rm_read_subblock(&body, &value) != RM_OK)
+    return false;
+  /* Kind and the fixed-size fields for tool, color, thickness and starting
+   * length. */
+  if (rm_reader_remaining(&value) < 25) return false;
+  value.offset += 25;
+  rm_crdt_id move;
+  return rm_match_tag(&value, 5, RM_TAG_LENGTH4) &&
+         rm_read_subblock(&value, &points) == RM_OK &&
+         rm_read_crdt(&value, 7, &move) == RM_OK &&
+         rm_crdt_equal(move, rm_crdt_of(expected)) &&
+         !rm_reader_remaining(&value);
+}
+
+static bool active_layer_is(const uint8_t* bytes, size_t size,
+                            rm_item_id expected) {
+  block_view blocks[128];
+  size_t n = blocks_of(bytes, size, blocks, 128);
+  for (size_t i = 0; i < n; i++) {
+    if (blocks[i].type != 13) continue;
+    rm_reader r = {.data = blocks[i].body, .size = blocks[i].length}, field;
+    rm_crdt_id node;
+    return rm_match_tag(&r, 1, RM_TAG_LENGTH4) &&
+           rm_read_subblock(&r, &field) == RM_OK &&
+           rm_skip_crdt(&field, 1) == RM_OK &&
+           rm_read_crdt(&field, 2, &node) == RM_OK &&
+           rm_crdt_equal(node, rm_crdt_of(expected));
+  }
+  return false;
+}
+
+static void edit_revisions(void) {
+  rm_page_draft draft = {.sheet = {1404, 1872, 1404, 1872}, .column = {936, 1}};
+  uint8_t* initial = nullptr;
+  size_t length = 0;
+  RM_CHECK(rm_write_page(&draft, &initial, &length, nullptr) == RM_OK, "base");
+  rm_edit_session* session = nullptr;
+  RM_CHECK(rm_edit_open(initial, length, &session, nullptr) == RM_OK, "open");
+  if (!session) {
+    rm_bytes_free(initial);
+    return;
+  }
+  rm_item_id node = {1, 11}, id = {1, 100000}, none = {0};
+  rm_draft_point point = rm_draft_point_make(3, 4);
+  rm_draft_stroke stroke = rm_draft_stroke_make(
+      RM_TOOL_HIGHLIGHTER_2, RM_COLOR_HIGHLIGHTER_GRAY, &point, 1);
+  RM_CHECK(rm_edit_insert_stroke(session, node, id, none, none, &stroke,
+                                 nullptr) == RM_OK,
+           "insert");
+  RM_CHECK(rm_edit_insert_stroke(session, node, id, none, none, &stroke,
+                                 nullptr) == RM_ERR_INVALID_ARGUMENT,
+           "id collision");
+  size_t size = 0;
+  const uint8_t* at = rm_edit_bytes(session, &size);
+  rm_page* page = parse(at, size);
+  RM_CHECK(page && page->stroke_count == 1 &&
+               rm_item_id_equal(page->strokes[0].id, id),
+           "inserted id");
+  rm_page_free(page);
+  RM_CHECK(rm_edit_set_node_visible(session, node, (rm_item_id){1, 100001},
+                                    false, nullptr) == RM_OK,
+           "hide");
+  at = rm_edit_bytes(session, &size);
+  page = parse(at, size);
+  RM_CHECK(page && !page->stroke_count, "hidden");
+  rm_page_free(page);
+  RM_CHECK(
+      rm_edit_undo(session) && rm_edit_redo(session) && rm_edit_undo(session),
+      "navigation");
+  RM_CHECK(rm_edit_set_node_name(session, node, (rm_item_id){1, 100002},
+                                 "Layer B", nullptr) == RM_OK,
+           "rename");
+  RM_CHECK(!rm_edit_redo(session), "divergent edit");
+  RM_CHECK(rm_edit_erase(session, &id, 1, nullptr) == RM_OK, "erase");
+  RM_CHECK(
+      rm_edit_undo(session) && rm_edit_undo(session) && rm_edit_undo(session),
+      "restore original");
+  at = rm_edit_bytes(session, &size);
+  RM_CHECK(size == length && !memcmp(initial, at, size), "exact original");
+  RM_CHECK(rm_edit_replace_text(session, 0, 0, "Hello λ\nworld",
+                                (rm_item_id){1, 200000}, nullptr) == RM_OK,
+           "new root");
+  RM_CHECK(rm_edit_replace_text(session, 2, 3, "y", (rm_item_id){1, 200020},
+                                nullptr) == RM_OK,
+           "replace inside a run");
+  at = rm_edit_bytes(session, &size);
+  page = parse(at, size);
+  RM_CHECK(page && page->has_text && page->text.paragraph_count == 2 &&
+               page->text.paragraphs[0].text.length == 6 &&
+               !memcmp(page->text.paragraphs[0].text.bytes, "Hey λ", 6),
+           "edited text");
+  rm_page_free(page);
+  RM_CHECK(rm_edit_replace_text(session, 3, 4, "!", (rm_item_id){1, 200030},
+                                nullptr) == RM_OK,
+           "edit across newline");
+  RM_CHECK(rm_edit_undo(session), "undo a text edit");
+  rm_item_id added = {1, 300000};
+  RM_CHECK(rm_edit_add_layer(session, 0, "Overlay", added, nullptr) == RM_OK,
+           "add at front");
+  rm_edit_layer* layers = nullptr;
+  size_t layer_count = 0;
+  RM_CHECK(rm_edit_layers(session, &layers, &layer_count, nullptr) == RM_OK &&
+               layer_count == 2 && rm_item_id_equal(layers[0].node, added),
+           "new drawing order");
+  rm_edit_layers_free(layers);
+  RM_CHECK(rm_edit_move_layer(session, added, 1, (rm_item_id){1, 300010},
+                              nullptr) == RM_OK,
+           "move to end");
+  layers = nullptr;
+  RM_CHECK(rm_edit_layers(session, &layers, &layer_count, nullptr) == RM_OK &&
+               layer_count == 2 && rm_item_id_equal(layers[1].node, added),
+           "moved order");
+  rm_edit_layers_free(layers);
+  rm_draft_point samples[] = {rm_draft_point_make(1, 2),
+                              rm_draft_point_make(3, 4),
+                              rm_draft_point_make(5, 6)};
+  stroke =
+      rm_draft_stroke_make(RM_TOOL_FINELINER_2, RM_COLOR_BLACK, samples, 3);
+  RM_CHECK(rm_edit_insert_stroke(session, added, id, none, none, &stroke,
+                                 nullptr) == RM_OK,
+           "add a line to overlay");
+  rm_item_id moved = {1, 300020};
+  RM_CHECK(rm_edit_transform_stroke(session, id, moved,
+                                    (rm_edit_transform){1, 0, 0, 1, 5, 9},
+                                    nullptr) == RM_OK,
+           "translate");
+  at = rm_edit_bytes(session, &size);
+  page = parse(at, size);
+  RM_CHECK(page && page->stroke_count == 1 &&
+               page->strokes[0].points[0].x == 6 &&
+               page->strokes[0].points[0].y == 11,
+           "translated points");
+  rm_page_free(page);
+  RM_CHECK(rm_edit_cut_stroke(session, moved, (rm_item_id){1, 300030}, 1, 1,
+                              nullptr) == RM_OK,
+           "cut middle");
+  at = rm_edit_bytes(session, &size);
+  page = parse(at, size);
+  RM_CHECK(page && page->stroke_count == 2 &&
+               page->strokes[0].point_count == 1 &&
+               page->strokes[1].point_count == 1,
+           "surviving pieces");
+  rm_page_free(page);
+  block_view blocks[128];
+  size_t n = blocks_of(at, size, blocks, 128), kept_moves = 0;
+  for (size_t i = 0; i < n; i++)
+    if (blocks[i].type == 5 && line_has_move_only(&blocks[i], id)) kept_moves++;
+  RM_CHECK(kept_moves == 2, "both pieces keep move id and absent timestamp");
+  rm_item_id pieces[] = {{1, 300030}, {1, 300031}};
+  const rm_edit_transform translate = {1, 0, 0, 1, -2, 7};
+  rm_item_id invalid[] = {pieces[0], {1, 9999999}};
+  RM_CHECK(
+      rm_edit_transform_strokes(session, invalid, 2, (rm_item_id){1, 400000},
+                                translate, nullptr) == RM_ERR_ITEMS_NOT_FOUND,
+      "reject entire selection");
+  size_t unchanged;
+  RM_CHECK(rm_edit_bytes(session, &unchanged) == at && unchanged == size,
+           "failed selection preserves revision");
+  RM_CHECK(
+      rm_edit_transform_strokes(session, pieces, 2, (rm_item_id){1, 400000},
+                                translate, nullptr) == RM_OK,
+      "translate both pieces");
+  RM_CHECK(rm_edit_undo(session) && rm_edit_bytes(session, &unchanged) == at,
+           "one undo restores selection");
+  RM_CHECK(rm_edit_delete_layer(session, added, (rm_item_id){1, 300040},
+                                nullptr) == RM_OK,
+           "remove overlay");
+  at = rm_edit_bytes(session, &size);
+  page = parse(at, size);
+  RM_CHECK(page && page->stroke_count == 0, "removed layer invisible");
+  rm_page_free(page);
+  rm_item_id top={1,500000},middle={1,500010};
+  RM_CHECK(rm_edit_add_layer(session,1,"Top",top,nullptr)==RM_OK,"add top");
+  RM_CHECK(rm_edit_add_layer(session,1,"Middle",middle,nullptr)==RM_OK,"add active middle");
+  RM_CHECK(rm_edit_delete_layer(session, middle, (rm_item_id){1, 500020},
+                                nullptr) == RM_OK,
+           "delete active middle");
+  at = rm_edit_bytes(session, &size);
+  RM_CHECK(active_layer_is(at, size, top),
+           "activate successor in deleted slot");
+  RM_CHECK(rm_edit_delete_layer(session, top, (rm_item_id){1, 500030},
+                                nullptr) == RM_OK,
+           "delete active top");
+  at = rm_edit_bytes(session, &size);
+  RM_CHECK(active_layer_is(at, size, node), "activate predecessor at end");
+  rm_edit_close(session);
+  rm_bytes_free(initial);
+}
+
+static rm_edit_session* open_page(const rm_buf* page) {
+  rm_edit_session* s = nullptr;
+  RM_CHECK(rm_edit_open(page->bytes, page->count, &s, nullptr) == RM_OK,
+           "open test page");
+  return s;
+}
+
+static void stroke_selection_and_reservations(void) {
+  rm_buf page;
+  start_page(&page);
+  append_layer(&page, SHOWN, false, rm_crdt_make(1, 12));
+  append_stroke(&page, rm_crdt_make(1, 90), SHOWN, RM_TOOL_FINELINER_2);
+  rm_edit_session* s = open_page(&page);
+  rm_item_id id = {1, 90}, fresh = {1, 200}, selection[] = {id, fresh};
+  rm_edit_transform m = {1, 0, 0, 1, 1, 0};
+  RM_CHECK(rm_edit_erase(s, &id, 1, nullptr) == RM_OK && rm_edit_undo(s),
+           "seed redo");
+  size_t size;
+  const uint8_t* before = rm_edit_bytes(s, &size);
+  RM_CHECK(rm_edit_transform_strokes(s, selection, 2, fresh, m, nullptr) ==
+               RM_ERR_ITEMS_NOT_FOUND,
+           "original selection");
+  RM_CHECK(rm_edit_bytes(s, &size) == before && rm_edit_redo(s),
+           "failed selection keeps history");
+  rm_edit_close(s);
+  s = open_page(&page);
+  RM_CHECK(rm_edit_transform_stroke(s, id, (rm_item_id){1, UINT64_MAX}, m,
+                                    nullptr) == RM_OK,
+           "final transform ID");
+  rm_edit_close(s);
+  s = open_page(&page);
+  RM_CHECK(
+      rm_edit_cut_stroke(s, id, (rm_item_id){1, 89}, 0, 1, nullptr) == RM_OK,
+      "one surviving piece");
+  rm_edit_close(s);
+  s = open_page(&page);
+  RM_CHECK(rm_edit_cut_stroke(s, id, (rm_item_id){0}, 0, 2, nullptr) == RM_OK,
+           "cut with no surviving piece needs no ID");
+  rm_edit_close(s);
+  append_stroke(&page, rm_crdt_make(1, 91), SHOWN, RM_TOOL_FINELINER_2);
+  s = open_page(&page);
+  rm_item_id both[] = {id, {1, 91}};
+  RM_CHECK(rm_edit_transform_strokes(s, both, 2, (rm_item_id){1, UINT64_MAX}, m,
+                                     nullptr) == RM_ERR_INVALID_ARGUMENT,
+           "batch overflows");
+  RM_CHECK(
+      rm_edit_transform_strokes(s, both, 2, (rm_item_id){1, UINT64_MAX - 1}, m,
+                                nullptr) == RM_OK,
+      "batch ends on final ID");
+  rm_edit_close(s);
+  block_view blocks[8];
+  size_t n = blocks_of(page.bytes, page.count, blocks, 8);
+  page.bytes[blocks[n - 2].body - page.bytes - 2] = 3;
+  s = open_page(&page);
+  RM_CHECK(rm_edit_transform_stroke(s, id, fresh, m, nullptr) == RM_OK,
+           "compatible extended line");
+  rm_edit_close(s);
+  rm_buf_free(&page);
+}
+
+static void deletion_preserves_live_active_layer(void) {
+  rm_buf page, info = {0}, field = {0};
+  start_page(&page);
+  append_two_layers(&page, false);
+  rm_write_id(&field, 1, rm_crdt_make(1, 40));
+  rm_write_id(&field, 2, rm_crdt_make(1, 999));
+  rm_write_block(&info, 1, field.bytes, field.count);
+  append_block(&page, 13, 0, 1, info.bytes, info.count);
+  rm_edit_session* s = open_page(&page);
+  RM_CHECK(rm_edit_delete_layer(s, rm_item_id_of(SHOWN), (rm_item_id){1, 500},
+                                nullptr) == RM_ERR_UNVERIFIED,
+           "refuse dangling active layer");
+  rm_edit_close(s);
+  rm_buf_free(&page);
+  rm_buf_free(&info);
+  rm_buf_free(&field);
+}
+static void layer_links_and_registers(void) {
+  rm_buf page;
+  start_page(&page);
+  rm_item_id node = rm_item_id_of(SHOWN), other = {1, 300}, none = {0};
+  append_layer(&page, SHOWN, true, rm_crdt_make(1, 12));
+  append_layer(&page, SHOWN, false, rm_crdt_make(1, 13));
+  rm_edit_session* s = open_page(&page);
+  size_t size;
+  const uint8_t* before = rm_edit_bytes(s, &size);
+  RM_CHECK(
+      rm_edit_delete_layer(s, node, (rm_item_id){1, 301}, nullptr) != RM_OK &&
+          rm_edit_bytes(s, &size) == before,
+      "duplicate links cannot delete sole node");
+  rm_edit_close(s);
+  s = open_page(&page);
+  RM_CHECK(rm_edit_set_node_visible(s, node, (rm_item_id){2, 90}, true,
+                                    nullptr) == RM_OK,
+           "historical visibility author tie");
+  RM_CHECK(rm_edit_set_node_visible(s, node, (rm_item_id){2, 90}, false,
+                                    nullptr) == RM_ERR_INVALID_ARGUMENT &&
+               rm_edit_set_node_visible(s, node, (rm_item_id){3, 89}, false,
+                                        nullptr) == RM_ERR_INVALID_ARGUMENT,
+           "identical and older stamps");
+  RM_CHECK(rm_edit_set_node_visible(s, node, (rm_item_id){1, 90}, false,
+                                    nullptr) == RM_ERR_INVALID_ARGUMENT,
+           "lower author");
+  rm_edit_close(s);
+  rm_buf_free(&page);
+  start_page(&page);
+  append_layer(&page, SHOWN, false, rm_crdt_make(1, 12));
+  s = open_page(&page);
+  RM_CHECK(rm_edit_add_layer(s, 0, "collision", (rm_item_id){1, 10}, nullptr) ==
+               RM_ERR_INVALID_ARGUMENT,
+           "layer reservation overlaps link");
+  rm_edit_close(s);
+  s = open_page(&page);
+  RM_CHECK(rm_edit_add_layer(s, 0, "new", other, nullptr) == RM_OK,
+           "add layer");
+  RM_CHECK(rm_edit_add_layer(s, 1, "equal counter", (rm_item_id){2, 300},
+                             nullptr) == RM_OK &&
+               rm_edit_undo(s),
+           "active register author tie");
+  RM_CHECK(
+      rm_edit_move_layer(s, node, 0, (rm_item_id){1, 100}, nullptr) == RM_OK,
+      "move before larger ID");
+  rm_edit_layer* layers = nullptr;
+  size_t count = 0;
+  RM_CHECK(rm_edit_layers(s, &layers, &count, nullptr) == RM_OK && count == 2 &&
+               rm_item_id_equal(layers[0].node, node),
+           "right layer neighbour");
+  rm_edit_layers_free(layers);
+  RM_CHECK(rm_edit_move_layer(s, node, 1, (rm_item_id){1, UINT64_MAX},
+                              nullptr) == RM_OK,
+           "final move ID");
+  RM_CHECK(rm_edit_delete_layer(s, other, (rm_item_id){2, UINT64_MAX - 1},
+                                nullptr) == RM_OK,
+           "final two delete IDs");
+  rm_edit_close(s);
+  append_removal(&page, SHOWN);
+  append_layer(&page, HIDDEN, false, rm_crdt_make(1, 23));
+  append_reinsertion(&page, HIDDEN, SHOWN);
+  s = open_page(&page);
+  RM_CHECK(rm_edit_set_node_name(s, rm_item_id_of(HIDDEN), other, "gone",
+                                 nullptr) == RM_ERR_ITEMS_NOT_FOUND,
+           "removed ancestor");
+  rm_draft_point pt = rm_draft_point_make(1, 2);
+  rm_draft_stroke stroke =
+      rm_draft_stroke_make(RM_TOOL_FINELINER_2, RM_COLOR_BLACK, &pt, 1);
+  RM_CHECK(rm_edit_set_node_name(s, node, other, "gone", nullptr) ==
+               RM_ERR_ITEMS_NOT_FOUND,
+           "removed node name");
+  RM_CHECK(rm_edit_insert_stroke(s, node, other, none, none, &stroke,
+                                 nullptr) == RM_ERR_ITEMS_NOT_FOUND,
+           "removed parent");
+  rm_edit_close(s);
+  rm_buf_free(&page);
+  start_page(&page);
+  append_layer(&page, SHOWN, false, rm_crdt_make(1, 12));
+  append_stroke(&page, rm_crdt_make(1, 800), SHOWN, RM_TOOL_FINELINER_2);
+  s = open_page(&page);
+  rm_item_id tail = {1, 800};
+  RM_CHECK(rm_edit_insert_stroke(s, node, other, none, tail, &stroke,
+                                 nullptr) == RM_OK,
+           "insert before larger ID");
+  const uint8_t* data = rm_edit_bytes(s, &size);
+  rm_page* p = parse(data, size);
+  RM_CHECK(
+      p && p->stroke_count == 2 && rm_item_id_equal(p->strokes[0].id, other),
+      "right stroke neighbour");
+  rm_page_free(p);
+  RM_CHECK(rm_edit_insert_stroke(s, node, (rm_item_id){1, 900}, tail, other,
+                                 &stroke, nullptr) == RM_ERR_INVALID_ARGUMENT,
+           "reversed neighbours");
+  RM_CHECK(
+      rm_edit_erase(s, &tail, 1, nullptr) == RM_OK &&
+          rm_edit_insert_stroke(s, node, (rm_item_id){1, 901}, tail, none,
+                                &stroke, nullptr) == RM_ERR_ITEMS_NOT_FOUND,
+      "dead neighbour");
+  rm_edit_close(s);
+  rm_buf_free(&page);
+}
+static void edit_preserves_nested_error(void) {
+  rm_buf page;
+  start_page(&page);
+  append_layer(&page, SHOWN, false, rm_crdt_make(1, 12));
+  rm_edit_session* s = open_page(&page);
+  /* Inject a version failure after open, at the nested read inside the edit. */
+  size_t size;
+  uint8_t* data = (uint8_t*)rm_edit_bytes(s, &size);
+  data[RM_HEADER_LENGTH + 5] = 3;
+  data[RM_HEADER_LENGTH + 6] = 3;
+  rm_error error;
+  RM_CHECK(rm_edit_replace_text(s, 0, 0, "x", (rm_item_id){1, 200}, &error) ==
+                   RM_ERR_UNSUPPORTED_BLOCK_VERSION &&
+               error.value == 2 && error.version == 3 && error.message[0],
+           "nested version diagnostic");
+  rm_edit_close(s);
+  rm_buf_free(&page);
+}
+static void migration_version_and_string_bounds(void) {
+  rm_buf page;
+  start_page(&page);
+  append_block(&page, 0, 2, 2, nullptr, 0);
+  rm_error detail;
+  rm_page* p = nullptr;
+  RM_CHECK(rm_parse_page(page.bytes, page.count, &p, &detail) ==
+                   RM_ERR_UNSUPPORTED_BLOCK_VERSION &&
+               detail.version == 2 && detail.value == 0,
+           "migration minimum");
+  rm_page_free(p);
+  rm_buf_free(&page);
+  size_t limit = (SIZE_MAX - 1) / 3;
+  RM_CHECK(rm_utf8_repair_bound(limit) == limit * 3 + 1 &&
+               rm_utf8_repair_bound(limit + 1) == 0 &&
+               rm_utf8_repair_bound(SIZE_MAX) == 0,
+           "checked repair bound");
+}
+
+static bool text_links(rm_edit_session* s, rm_item_id target, rm_item_id left,
+                       rm_item_id right) {
+  size_t size;
+  const uint8_t* data = rm_edit_bytes(s, &size);
+  block_view blocks[64];
+  size_t n = blocks_of(data, size, blocks, 64);
+  for (size_t i = 0; i < n; i++) {
+    if (blocks[i].type != 7) continue;
+    rm_reader r = {.data = blocks[i].body, .size = blocks[i].length};
+    if (rm_skip_crdt(&r, 1) != RM_OK) return false;
+    const unsigned tags[] = {2, 1, 1};
+    for (size_t j = 0; j < 3; j++) {
+      rm_reader sub;
+      if (!rm_match_tag(&r, tags[j], RM_TAG_LENGTH4) ||
+          rm_read_subblock(&r, &sub) != RM_OK)
+        return false;
+      r = sub;
+    }
+    size_t count;
+    if (rm_read_count(&r, &count) != RM_OK) return false;
+    for (size_t j = 0; j < count; j++) {
+      rm_reader row;
+      rm_crdt_id id, l, h;
+      if (!rm_match_tag(&r, 0, RM_TAG_LENGTH4) ||
+          rm_read_subblock(&r, &row) != RM_OK ||
+          rm_read_crdt(&row, 2, &id) != RM_OK ||
+          rm_read_crdt(&row, 3, &l) != RM_OK ||
+          rm_read_crdt(&row, 4, &h) != RM_OK)
+        return false;
+      if (rm_crdt_equal(id, rm_crdt_of(target)))
+        return rm_crdt_equal(l, rm_crdt_of(left)) &&
+               rm_crdt_equal(h, rm_crdt_of(right));
+    }
+  }
+  return false;
+}
+static void text_edit_neighbours(void) {
+  rm_buf page;
+  start_page(&page);
+  rm_edit_session* s = open_page(&page);
+  rm_item_id a = {1, 100}, b = {1, 200}, x = {1, 300}, none = {0};
+  RM_CHECK(rm_edit_replace_text(s, 0, 0, "A", a, nullptr) == RM_OK &&
+               rm_edit_replace_text(s, 0, 0, "B", b, nullptr) == RM_OK &&
+               rm_edit_replace_text(s, 1, 0, "X", x, nullptr) == RM_OK &&
+               text_links(s, x, b, a),
+           "record boundary links");
+  rm_edit_close(s);
+  s = open_page(&page);
+  RM_CHECK(rm_edit_replace_text(s, 0, 0, "AB", a, nullptr) == RM_OK &&
+               rm_edit_replace_text(s, 1, 1, "", none, nullptr) == RM_OK &&
+               rm_edit_replace_text(s, 1, 0, "X", x, nullptr) == RM_OK &&
+               text_links(s, x, a, none),
+           "append past tombstone");
+  rm_edit_close(s);
+  append_zeros_block(&page, 10, 108);
+  s = open_page(&page);
+  RM_CHECK(rm_edit_replace_text(s, 0, 0, "X", x, nullptr) == RM_OK,
+           "opaque PageInfo tail");
+  rm_edit_close(s);
+  rm_buf_free(&page);
+}
+
+static bool stats_are(const uint8_t* bytes, size_t size, uint32_t chars,
+                      uint32_t lines) {
+  block_view blocks[64];
+  size_t n = blocks_of(bytes, size, blocks, 64);
+  for (size_t i = 0; i < n; i++)
+    if (blocks[i].type == 10) {
+      rm_reader r = {.data = blocks[i].body, .size = blocks[i].length};
+      uint32_t v;
+      for (uint32_t tag = 1; tag <= 4; tag++) {
+        if (!rm_match_tag(&r, tag, RM_TAG_BYTE4) ||
+            rm_read_u32(&r, &v) != RM_OK)
+          return false;
+        if ((tag == 3 && v != chars) || (tag == 4 && v != lines)) return false;
+      }
+      return true;
+    }
+  return false;
+}
+static void replacing_styled_paragraph_break(void) {
+  rm_draft_paragraph paragraphs[] = {
+      {.text = "Intro"},
+      {.text = "Section", .has_style = true, .style = RM_PARA_HEADING}};
+  rm_page_draft draft = {.sheet = {1404, 1872, 1404, 1872},
+                         .column = {936, 1},
+                         .paragraphs = paragraphs,
+                         .paragraph_count = 2};
+  size_t size;
+  uint8_t* data;
+  RM_CHECK(rm_write_page(&draft, &data, &size, nullptr) == RM_OK,
+           "write heading");
+  rm_edit_session* s = nullptr;
+  RM_CHECK(rm_edit_open(data, size, &s, nullptr) == RM_OK &&
+               rm_edit_replace_text(s, 4, 3, "x\nS", (rm_item_id){1, 500},
+                                    nullptr) == RM_OK,
+           "replace paragraph break");
+  const uint8_t* bytes = rm_edit_bytes(s, &size);
+  rm_page* p = parse(bytes, size);
+  RM_CHECK(p && p->text.paragraph_count == 2 &&
+               p->text.paragraphs[1].has_format &&
+               p->text.paragraphs[1].format.raw == RM_PARA_HEADING,
+           "retain heading across replacement");
+  rm_page_free(p);
+  rm_edit_close(s);
+  rm_bytes_free(data);
+}
+static void written_and_edited_text_counts(void) {
+  rm_draft_paragraph paragraphs[] = {{.text = "AB", .bold = true},
+                                     {.text = "😀"}};
+  rm_page_draft draft = {.sheet = {1404, 1872, 1404, 1872},
+                         .column = {936, 1},
+                         .paragraphs = paragraphs,
+                         .paragraph_count = 2};
+  size_t size;
+  uint8_t* data;
+  RM_CHECK(rm_write_page(&draft, &data, &size, nullptr) == RM_OK, "write text");
+  RM_CHECK(stats_are(data, size, 6, 2), "written PageInfo counts");
+  rm_edit_session* s = nullptr;
+  RM_CHECK(rm_edit_open(data, size, &s, nullptr) == RM_OK &&
+               rm_edit_replace_text(s, 0, 1, "A", (rm_item_id){1, 800},
+                                    nullptr) == RM_OK,
+           "edit text");
+  RM_CHECK(rm_edit_add_layer(s, 0, "overlap", (rm_item_id){1, 20}, nullptr) ==
+               RM_ERR_INVALID_ARGUMENT,
+           "layer overlaps text ID");
+  const uint8_t* edited = rm_edit_bytes(s, &size);
+  RM_CHECK(stats_are(edited, size, 6, 2), "edited PageInfo counts");
+  rm_edit_close(s);
+  rm_bytes_free(data);
+}
+static void editing_repaired_text_and_face_markers(void) {
+  rm_draft_paragraph paragraphs[] = {{.bold = true}};
+  rm_page_draft draft = {.sheet = {1404, 1872, 1404, 1872},
+                         .column = {936, 1},
+                         .paragraphs = paragraphs};
+  rm_edit_session* s = nullptr;
+  uint8_t* data;
+  size_t size;
+  paragraphs[0].text = "QZB";
+  draft.paragraph_count = 1;
+  RM_CHECK(rm_write_page(&draft, &data, &size, nullptr) == RM_OK,
+           "write bold text");
+  RM_CHECK(rm_edit_open(data, size, &s, nullptr) == RM_OK &&
+               rm_edit_replace_text(s, 3, 0, "!", (rm_item_id){1, 800},
+                                    nullptr) == RM_OK &&
+               text_links(s, (rm_item_id){1, 800}, (rm_item_id){1, 22},
+                          (rm_item_id){0}),
+           "append past face mark");
+  rm_edit_close(s);
+  for (size_t i = 0; i + 3 <= size; i++)
+    if (!memcmp(data + i, "QZB", 3)) {
+      data[i + 1] = 0x80;
+      break;
+    }
+  RM_CHECK(rm_edit_open(data, size, &s, nullptr) == RM_OK &&
+               rm_edit_replace_text(s, 1, 1, "X", (rm_item_id){1, 800},
+                                    nullptr) == RM_OK,
+           "edit repaired scalar");
+  const uint8_t* view = rm_edit_bytes(s, &size);
+  rm_page* parsed = parse(view, size);
+  RM_CHECK(parsed && parsed->has_text && parsed->text.paragraph_count == 1 &&
+               parsed->text.paragraphs[0].text.length == 3 &&
+               !memcmp(parsed->text.paragraphs[0].text.bytes, "QXB", 3) &&
+               text_links(s, (rm_item_id){1, 800}, (rm_item_id){1, 20},
+                          (rm_item_id){1, 21}) &&
+               text_links(s, (rm_item_id){1, 22}, (rm_item_id){1, 21},
+                          (rm_item_id){0}),
+           "keep Q and B IDs");
+  rm_page_free(parsed);
+  rm_edit_close(s);
+  rm_bytes_free(data);
+}
+
+static void stroke_replacement_order(void) {
+  rm_buf page;
+  start_page(&page);
+  append_two_layers(&page, false);
+  rm_item_id id = {1, 800}, eraser = {1, 900}, fresh = {2, 200};
+  append_stroke(&page, rm_crdt_of(id), SHOWN, RM_TOOL_FINELINER_2);
+  rm_edit_session* s = open_page(&page);
+  rm_draft_point pt = rm_draft_point_make(0, 200);
+  rm_draft_stroke stroke = rm_draft_stroke_make(RM_TOOL_ERASER, RM_COLOR_BLACK, &pt, 1);
+  RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(SHOWN), eraser, id,
+                                 (rm_item_id){0}, &stroke, nullptr) == RM_OK, "insert eraser");
+  for (int cut = 0; cut <= 1; cut++) {
+    rm_status status = cut ? rm_edit_cut_stroke(s, id, fresh, 1, 1, nullptr)
+                           : rm_edit_transform_stroke(s, id, fresh,
+                                 (rm_edit_transform){1, 0, 0, 1, 0, 0}, nullptr);
+    RM_CHECK(status == RM_OK, "replace ink");
+    size_t size;
+    const uint8_t* bytes = rm_edit_bytes(s, &size);
+    rm_page* parsed = parse(bytes, size);
+    RM_CHECK(parsed && parsed->stroke_count == 2 &&
+             rm_item_id_equal(parsed->strokes[0].id, fresh) &&
+             rm_item_id_equal(parsed->strokes[1].id, eraser),
+             "replacement stays below eraser (cut=%d)", cut);
+    rm_page_free(parsed);
+    RM_CHECK(rm_edit_undo(s), "undo replacement");
+  }
+  rm_edit_close(s);
+  rm_buf_free(&page);
+}
+
+static void removed_stroke_parents(void) {
+  rm_buf page;
+  start_page(&page);
+  append_two_layers(&page, false);
+  append_reinsertion(&page, HIDDEN, SHOWN);
+  append_removal(&page, SHOWN);
+  append_stroke(&page, rm_crdt_make(1, 800), SHOWN, RM_TOOL_FINELINER_2);
+  append_stroke(&page, rm_crdt_make(1, 801), HIDDEN, RM_TOOL_FINELINER_2);
+  for (int i = 0; i < 2; i++) {
+    rm_item_id id = {1, 800 + i}, fresh = {2, 200};
+    for (int cut = 0; cut <= 1; cut++) {
+      rm_edit_session* s = open_page(&page);
+      rm_status status = cut ? rm_edit_cut_stroke(s, id, fresh, 1, 1, nullptr)
+                             : rm_edit_transform_stroke(s, id, fresh,
+                                   (rm_edit_transform){1, 0, 0, 1, 0, 0}, nullptr);
+      RM_CHECK(status == RM_ERR_ITEMS_NOT_FOUND && !rm_edit_undo(s),
+               "removed parent %d, cut=%d", i, cut);
+      rm_edit_close(s);
+    }
+  }
+  rm_buf_free(&page);
+}
+
+static void repeated_current_layer_stamps(void) {
+  rm_buf page, info = {0};
+  start_page(&page);
+  append_two_layers(&page, false);
+  for (int i = 0; i < 2; i++) {
+    rm_buf field = {0};
+    rm_write_id(&field, 1, rm_crdt_make(1, i ? 900 : 100));
+    rm_write_id(&field, 2, SHOWN);
+    rm_write_block(&info, 1, field.bytes, field.count);
+    rm_buf_free(&field);
+  }
+  append_block(&page, 13, 0, 1, info.bytes, info.count);
+  rm_edit_session* s = open_page(&page);
+  RM_CHECK(rm_edit_add_layer(s, 0, "new", (rm_item_id){1, 500}, nullptr) ==
+                   RM_ERR_INVALID_ARGUMENT &&
+               !rm_edit_undo(s),
+           "a stale update cannot replace a repeated active-layer register");
+  rm_edit_close(s);
+  rm_buf_free(&page);
+  rm_buf_free(&info);
+}
+
+static void historical_active_layers(void) {
+  rm_buf page;
+  start_page(&page);
+  append_two_layers(&page, false);
+  rm_crdt_id third = rm_crdt_make(1, 31);
+  append_layer(&page, third, false, rm_crdt_make(1, 32));
+  for (int i = 0; i < 2; i++) {
+    rm_buf field = {0}, info = {0};
+    rm_write_id(&field, 1, rm_crdt_make(1, i ? 200 : 100));
+    rm_write_id(&field, 2, i ? third : SHOWN);
+    rm_write_block(&info, 1, field.bytes, field.count);
+    append_block(&page, 13, 0, 1, info.bytes, info.count);
+    rm_buf_free(&field);
+    rm_buf_free(&info);
+  }
+  rm_edit_session* s = open_page(&page);
+  RM_CHECK(rm_edit_delete_layer(s, rm_item_id_of(SHOWN), (rm_item_id){1, 500},
+                                nullptr) == RM_OK, "delete inactive layer");
+  size_t size;
+  const uint8_t* bytes = rm_edit_bytes(s, &size);
+  RM_CHECK(size >= page.count && !memcmp(bytes, page.bytes, page.count),
+           "deleting inactive layer preserves both historical registers");
+  rm_edit_close(s);
+  rm_buf_free(&page);
+}
+
+static void interleaved_page_counts(void) {
+  rm_buf page, info = {0};
+  start_page(&page);
+  for (uint32_t i = 1; i <= 4; i++) {
+    if (i == 3) {
+      rm_write_tag(&info, 6, RM_TAG_BYTE1);
+      rm_buf_append_byte(&info, 0x74);
+    }
+    rm_write_tag(&info, i, RM_TAG_BYTE4);
+    rm_write_u32(&info, i == 1);
+  }
+  append_block(&page, 10, 0, 1, info.bytes, info.count);
+  rm_edit_session* s = open_page(&page);
+  RM_CHECK(rm_edit_replace_text(s, 0, 0, "AB", (rm_item_id){1, 400}, nullptr) == RM_OK,
+           "insert text with mixed PageInfo");
+  info.bytes[info.count - 9] = 3;
+  info.bytes[info.count - 4] = 1;
+  size_t size;
+  const uint8_t* bytes = rm_edit_bytes(s, &size);
+  block_view blocks[8];
+  size_t n = blocks_of(bytes, size, blocks, 8);
+  bool matched = false;
+  for (size_t i = 0; i < n; i++)
+    if (blocks[i].type == 10 && blocks[i].length == info.count)
+      matched = !memcmp(blocks[i].body, info.bytes, info.count);
+  RM_CHECK(matched, "mixed PageInfo retains unknown field and updates both counts");
+  rm_edit_close(s);
+  rm_buf_free(&page);
+  rm_buf_free(&info);
+}
+
+static void stroke_point_allocation_overflow(void) {
+  rm_arena* arena = rm_arena_create();
+  RM_CHECK(rm_alloc_stroke_points(arena, SIZE_MAX / sizeof(rm_stroke_point) + 1) == nullptr,
+           "reject overflowing stroke point array");
+  rm_arena_destroy(arena);
+}
+
+static rm_page* parse_session_bytes(rm_edit_session* session) {
+  size_t size;
+  const uint8_t* bytes = rm_edit_bytes(session, &size);
+  return parse(bytes, size);
+}
+
+static uint8_t* anchored_page(const char* first, const char* second,
+                              size_t* size) {
+  rm_draft_paragraph paragraphs[] = {{.text = first}, {.text = second}};
+  rm_draft_point points[] = {rm_draft_point_make(0, 0),
+                             rm_draft_point_make(40, 0)};
+  rm_draft_mark mark = {.anchor = {RM_ANCHOR_FIRST_CHARACTER, 1},
+                        .stroke = rm_draft_stroke_make(
+                            RM_TOOL_FINELINER_2, RM_COLOR_BLACK, points, 2)};
+  rm_page_draft draft = {.sheet = {1404, 1872, 1404, 1872},
+                         .column = {936, 1},
+                         .paragraphs = paragraphs,
+                         .paragraph_count = 2,
+                         .marks = &mark,
+                         .mark_count = 1};
+  uint8_t* data = nullptr;
+  RM_CHECK(rm_write_page(&draft, &data, size, nullptr) == RM_OK,
+           "write anchored page");
+  return data;
+}
+
+static void replacing_anchored_character(void) {
+  size_t size;
+  uint8_t* data = anchored_page("Intro", "XYZ", &size);
+  rm_edit_session* s = nullptr;
+  RM_CHECK(rm_edit_open(data, size, &s, nullptr) == RM_OK,
+           "open anchored page");
+  const char* replacements[] = {"X", "Q"};
+  for (size_t i = 0; i < 2; ++i) {
+    RM_CHECK(
+        rm_edit_replace_text(s, 6, 1, replacements[i],
+                             (rm_item_id){1, 900000 + i}, nullptr) == RM_OK,
+        "replace anchored X with %s", replacements[i]);
+    rm_page* p = parse_session_bytes(s);
+    RM_CHECK(p && p->stroke_count == 1 && p->strokes[0].has_anchor &&
+                 p->strokes[0].anchor.paragraph == 1 &&
+                 p->strokes[0].anchor.offset == 1,
+             "X to %s retains paragraph 1 offset 1", replacements[i]);
+    rm_page_free(p);
+    RM_CHECK(rm_edit_undo(s), "undo replacement");
+  }
+  RM_CHECK(rm_edit_replace_text(s, 6, 1, "", (rm_item_id){0}, nullptr) ==
+               RM_ERR_UNVERIFIED,
+           "refuse removal of the anchor target");
+  size_t after_size;
+  const uint8_t* after = rm_edit_bytes(s, &after_size);
+  RM_CHECK(after_size == size && !memcmp(after, data, size) && !rm_edit_undo(s),
+           "refusal preserves bytes and history");
+  rm_edit_close(s);
+  rm_bytes_free(data);
+}
+
+static void anchor_survives_peer_rename(void) {
+  size_t size;
+  uint8_t* data = anchored_page("ABC", "猫", &size);
+  rm_edit_session *local = nullptr, *peer = nullptr;
+  RM_CHECK(rm_edit_open(data, size, &local, nullptr) == RM_OK &&
+               rm_edit_open(data, size, &peer, nullptr) == RM_OK,
+           "open peers");
+  rm_bytes_free(data);
+  RM_CHECK(
+      rm_edit_set_node_name(peer, (rm_item_id){1, 100000},
+                            (rm_item_id){2, 900400}, "Peer", nullptr) == RM_OK,
+      "rename anchored group");
+  const rm_item_id invalid[] = {{2, 90}, {1, 99998}, {2, UINT64_MAX - 1}};
+  for (size_t i = 0; i < sizeof invalid / sizeof *invalid; ++i) {
+    RM_CHECK(rm_edit_replace_text(local, 3, 2, "\n犬", invalid[i], nullptr) ==
+                     RM_ERR_INVALID_ARGUMENT &&
+                 !rm_edit_undo(local),
+             "refuse stale, colliding, or overflowing anchor stamp (%zu)", i);
+  }
+  RM_CHECK(rm_edit_replace_text(local, 3, 2, "\n犬", (rm_item_id){1, 900300},
+                                nullptr) == RM_OK,
+           "replace anchored character and break");
+  const uint8_t* renamed = rm_edit_bytes(peer, &size);
+  block_view blocks[64];
+  size_t n = blocks_of(renamed, size, blocks, 64);
+  const uint8_t* edited = rm_edit_bytes(local, &size);
+  size_t checked = 0;
+  for (size_t i = 0; i < n; ++i) {
+    rm_anchor_field anchor;
+    if (blocks[i].type != 2 ||
+        rm_read_node_anchor(
+            (rm_reader){.data = blocks[i].body, .size = blocks[i].length},
+            &anchor) != RM_OK ||
+        !anchor.field_end)
+      continue;
+    for (int last = 0; last <= 1; ++last) {
+      rm_buf merged = {0};
+      size_t split = last ? size : RM_HEADER_LENGTH;
+      rm_buf_append(&merged, edited, split);
+      rm_buf_append(&merged, blocks[i].body - 8, blocks[i].length + 8);
+      rm_buf_append(&merged, edited + split, size - split);
+      rm_page* p = parse(merged.bytes, merged.count);
+      RM_CHECK(
+          p && !p->skipped_blocks && p->stroke_count == 1 &&
+              p->strokes[0].has_anchor && p->strokes[0].anchor.paragraph == 1 &&
+              p->strokes[0].anchor.offset == 1 &&
+              p->text.paragraph_count == 2 &&
+              p->text.paragraphs[1].text.length == strlen("犬") &&
+              !memcmp(p->text.paragraphs[1].text.bytes, "犬", strlen("犬")),
+          "peer snapshot last=%d", last);
+      rm_page_free(p);
+      rm_buf_free(&merged);
+      ++checked;
+    }
+  }
+  RM_CHECK(checked == 2, "tested both orders");
+  rm_edit_close(peer);
+  rm_edit_close(local);
+}
+
+/* Remove only the group's sequence value, retaining its live placement. */
+static rm_edit_session* session_with_unlinked_group(rm_crdt_id parent) {
+  size_t size;
+  uint8_t* data = anchored_page("ABC", "猫", &size);
+  rm_buf page;
+  start_page(&page);
+  block_view blocks[64];
+  size_t n = blocks_of(data, size, blocks, 64);
+  size_t changed = 0;
+  for (size_t i = 0; i < n; ++i) {
+    block_view b = blocks[i];
+    rm_reader r = {.data = b.body, .size = b.length};
+    rm_item_preamble item;
+    if (b.type == 4 && rm_parse_item_preamble(&r, &item) == RM_OK &&
+        rm_crdt_equal(item.parent, parent)) {
+      rm_buf body = {0};
+      rm_buf_append(&body, b.body, r.offset - 4);
+      rm_write_u32(&body, 1);
+      append_block(&page, 4, b.min_version, b.current_version, body.bytes,
+                   body.count);
+      rm_buf_free(&body);
+      ++changed;
+    } else
+      rm_buf_append(&page, b.body - 8, b.length + 8);
+  }
+  RM_CHECK(changed == 1, "removed one ordering link");
+  rm_edit_session* s = open_page(&page);
+  rm_buf_free(&page);
+  rm_bytes_free(data);
+  return s;
+}
+
+static void expect_stroke_order(rm_edit_session* s, uint64_t first,
+                                uint64_t second) {
+  rm_page* p = parse_session_bytes(s);
+  RM_CHECK(p && !p->skipped_blocks && p->stroke_count == 2 &&
+               p->strokes[0].id.counter == first &&
+               p->strokes[1].id.counter == second,
+           "expected stroke order [%llu %llu]", (unsigned long long)first,
+           (unsigned long long)second);
+  rm_page_free(p);
+}
+
+static void moving_layer_with_unlinked_descendant(void) {
+  rm_item_id original = {1, 11}, other = {1, 900010};
+  rm_edit_session* s = session_with_unlinked_group(rm_crdt_of(original));
+  rm_draft_point point = rm_draft_point_make(0, 0);
+  rm_draft_stroke stroke =
+      rm_draft_stroke_make(RM_TOOL_FINELINER_2, RM_COLOR_BLACK, &point, 1);
+  RM_CHECK(rm_edit_add_layer(s, 0, "Other", other, nullptr) == RM_OK &&
+               rm_edit_insert_stroke(s, other, (rm_item_id){1, 900020},
+                                     (rm_item_id){0}, (rm_item_id){0}, &stroke,
+                                     nullptr) == RM_OK,
+           "add other ink");
+  expect_stroke_order(s, 900020, 100002);
+  RM_CHECK(rm_edit_move_layer(s, original, 0, (rm_item_id){1, 900030},
+                              nullptr) == RM_OK,
+           "move");
+  expect_stroke_order(s, 100002, 900020);
+  RM_CHECK(rm_edit_undo(s), "undo move");
+  expect_stroke_order(s, 900020, 100002);
+  RM_CHECK(rm_edit_redo(s), "redo move");
+  expect_stroke_order(s, 100002, 900020);
+  rm_edit_close(s);
+}
+
+static void unlinked_layer_counts_toward_limit(void) {
+  rm_edit_session* s = session_with_unlinked_group(rm_crdt_make(0, 1));
+  for (size_t i = 0; i <= 4; ++i) {
+    rm_edit_layer* layers = nullptr;
+    size_t count = 0;
+    RM_CHECK(rm_edit_layers(s, &layers, &count, nullptr) == RM_OK &&
+                 count == i + 1 &&
+                 rm_item_id_equal(layers[i].node, (rm_item_id){1, 11}),
+             "original layer follows %zu added layers", i);
+    rm_edit_layers_free(layers);
+    if (i < 4)
+      RM_CHECK(rm_edit_add_layer(s, i, "New", (rm_item_id){1, 900100 + 10 * i},
+                                 nullptr) == RM_OK,
+               "add layer below original");
+  }
+  size_t before_size, after_size;
+  const uint8_t* before = rm_edit_bytes(s, &before_size);
+  RM_CHECK(rm_edit_add_layer(s, 4, "Sixth", (rm_item_id){1, 900150}, nullptr) ==
+               RM_ERR_INVALID_ARGUMENT,
+           "reject sixth layer");
+  RM_CHECK(rm_edit_bytes(s, &after_size) == before && after_size == before_size,
+           "refusal retains current revision");
+  RM_CHECK(rm_edit_undo(s), "undo fourth addition");
+  rm_edit_layer* layers = nullptr;
+  size_t count;
+  RM_CHECK(rm_edit_layers(s, &layers, &count, nullptr) == RM_OK && count == 4 &&
+               rm_item_id_equal(layers[3].node, (rm_item_id){1, 11}),
+           "undo skips refused edit");
+  rm_edit_layers_free(layers);
+  rm_edit_close(s);
+}
+
+static void expect_visible_glyphs(rm_edit_session* s, size_t count) {
+  rm_page* page = parse_session_bytes(s);
+  RM_CHECK(page && page->highlight_count == count && page->skipped_blocks == 0,
+           "expected %zu visible glyphs, got %zu", count,
+           page ? page->highlight_count : 0);
+  rm_page_free(page);
+}
+
+static void glyphs_follow_layer_visibility(void) {
+  size_t size;
+  uint8_t* data = sample("Wikipedia_highlighted_p1.rm", &size);
+  rm_item_id layer = {0, 11};
+  rm_edit_session* s = nullptr;
+  RM_CHECK(rm_edit_open(data, size, &s, nullptr) == RM_OK,
+           "open highlighted page");
+  expect_visible_glyphs(s, 4);
+  RM_CHECK(rm_edit_set_node_visible(s, layer, (rm_item_id){1, 900001}, false,
+                                    nullptr) == RM_OK,
+           "hide glyph layer");
+  expect_visible_glyphs(s, 0);
+  RM_CHECK(rm_edit_undo(s), "undo hide");
+  expect_visible_glyphs(s, 4);
+  RM_CHECK(rm_edit_add_layer(s, 1, "Blank", (rm_item_id){1, 900100}, nullptr) ==
+                   RM_OK &&
+               rm_edit_delete_layer(s, layer, (rm_item_id){1, 900200},
+                                    nullptr) == RM_OK,
+           "delete visible glyph layer");
+  expect_visible_glyphs(s, 0);
+  RM_CHECK(rm_edit_undo(s), "undo deletion");
+  expect_visible_glyphs(s, 4);
+  rm_edit_close(s);
+  free(data);
+}
+
 int main(void) {
+  anchor_survives_peer_rename();
+  moving_layer_with_unlinked_descendant();
+  unlinked_layer_counts_toward_limit();
+  replacing_anchored_character();
+  glyphs_follow_layer_visibility();
+  stroke_replacement_order();
+  removed_stroke_parents();
+  repeated_current_layer_stamps();
+  historical_active_layers();
+  interleaved_page_counts();
+  stroke_point_allocation_overflow();
+  replacing_styled_paragraph_break();
+  text_edit_neighbours();
+  written_and_edited_text_counts();
+  editing_repaired_text_and_face_markers();
+  edit_preserves_nested_error();
+  migration_version_and_string_bounds();
+  deletion_preserves_live_active_layer();
+  layer_links_and_registers();
+  stroke_selection_and_reservations();
+  edit_revisions();
   a_tombstone_before_a_108_byte_block_is_a_tombstone();
   a_highlight_takes_no_colour_from_the_block_after_it();
   a_deleted_highlight_with_a_value_is_not_shown();

@@ -129,6 +129,23 @@ Two refusals, and both mean nothing was written — a half-page is worse than no
 
 ## Editing
 
+The library applies its implemented CRDT rules to partially merged concurrent edits from several devices. These page shapes have been verified with synthetic files only.
+
+Adding a layer enforces the device’s five-layer limit, including hidden layers and live placements with missing ordering links. [reMarkable’s layer documentation](https://support.remarkable.com/s/article/Layers)
+
+Open an existing v6 stream with `rm_edit_open`. The session owns its bytes.
+Use `rm_edit_layers` to find layer IDs, insert or transform strokes, cut ranges
+of recorded points, and add, move, rename, hide, or delete layers.
+`rm_edit_replace_text` addresses Unicode scalar offsets in the root text.
+Pass fresh counters from your registered page author for operations that
+create CRDT records. Reserve consecutive counters as specified in
+[editor.h](include/rmlines/editor.h).
+
+`rm_edit_undo` and `rm_edit_redo` navigate local revisions.
+`rm_edit_bytes` returns the current serialized page. Copy it before closing
+the session. History stays in memory. To persist an edit, save that byte
+sequence through the caller's normal file workflow.
+
 ```c
 rm_item_id target = page->strokes[3].id;      /* or rm_item_id_parse("1:1234", &target) */
 uint8_t *edited = NULL;
