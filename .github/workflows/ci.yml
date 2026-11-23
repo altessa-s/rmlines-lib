@@ -66,7 +66,7 @@ jobs:
           fi
           echo "$exported"
           count=$(echo "$exported" | wc -l)
-          test "$count" -eq 32 || { echo "expected 32 exported functions, found $count"; exit 1; }
+          test "$count" -eq 50 || { echo "expected 50 exported functions, found $count"; exit 1; }
 
       # `-std=c2x` and not `-std=c23`: the two name one standard, and gcc 13 —
       # the runner's gcc — knows only the older spelling. Every compiler CI
