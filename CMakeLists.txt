@@ -118,6 +118,14 @@ set(RMLINES_WARNING_FLAGS
 if(RMLINES_WERROR)
     list(APPEND RMLINES_WARNING_FLAGS -Werror)
 endif()
+# The Windows C runtime declares `fopen` and the other standard calls that
+# rmdump and the tests read files with as deprecated, in favour of its own
+# `_s` variants. Those are not standard C, and the warning would turn the
+# standard calls into a failed build under -Werror.
+if(WIN32)
+    list(APPEND RMLINES_WARNING_FLAGS
+        -D_CRT_SECURE_NO_WARNINGS -D_CRT_NONSTDC_NO_WARNINGS)
+endif()
 
 target_compile_options(rmlines PRIVATE ${RMLINES_WARNING_FLAGS})
 target_compile_features(rmlines PUBLIC c_std_23)
