@@ -39,7 +39,8 @@ static_assert(RM_HEADER_LENGTH == 43,
  * Read out of the header rather than compared against a list of known
  * spellings: the point is to recognise a generation nobody has written down
  * yet — a future 7 as much as the 3 and the 5 behind us — and say its number
- * instead of calling the file unrecognisable. */
+ * instead of calling the file unrecognisable. Values >= INT_MAX saturate to
+ * `*out_version = INT_MAX` and return true. */
 RM_API bool rm_header_version(const char* header, size_t length,
                               int* out_version);
 

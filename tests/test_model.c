@@ -10,6 +10,8 @@
  * fields, a nesting depth packed into half a byte. Written down here so that
  * tidying it breaks a test rather than a page. */
 
+#include <limits.h>
+
 #include "rm_test.h"
 #include "rmlines/rmlines.h"
 
@@ -37,6 +39,35 @@ static void the_version_is_read_out_of_the_header(void) {
   RM_CHECK(version_of("reMarkable .lines file, version=           ") == -1,
            "no digits");
   RM_CHECK(version_of("%PDF-1.4") == -1, "a PDF");
+
+  /* 8-digit, exact INT_MAX (2147483647), and 11-digit INT_MAX-saturated
+   * versions across both rm_header_version and rm_parse_page (R91, R9-2,
+   * R106). */
+  const char h8[] = "reMarkable .lines file, version=10000001   ";
+  const char h_max[] = "reMarkable .lines file, version=2147483647 ";
+  const char h11[] = "reMarkable .lines file, version=99999999999";
+  int v = -1;
+  RM_CHECK(rm_header_version(h8, RM_HEADER_LENGTH, &v) && v == 10000001,
+           "8-digit version parses exactly");
+  RM_CHECK(rm_header_version(h_max, RM_HEADER_LENGTH, &v) && v == INT_MAX,
+           "exact INT_MAX header version parses without overflow");
+  RM_CHECK(rm_header_version(h11, RM_HEADER_LENGTH, &v) && v == INT_MAX,
+           "11-digit header version saturates to INT_MAX");
+
+  const char* headers[] = {h8, h_max, h11};
+  const int expected[] = {10000001, INT_MAX, INT_MAX};
+  for (size_t i = 0; i < 3; ++i) {
+    rm_page* p = nullptr;
+    rm_error err = {0};
+    rm_status st =
+        rm_parse_page((const uint8_t*)headers[i], RM_HEADER_LENGTH, &p, &err);
+    RM_CHECK(st == RM_ERR_UNSUPPORTED_VERSION && p == nullptr &&
+                 err.status == RM_ERR_UNSUPPORTED_VERSION &&
+                 err.version == expected[i],
+             "header %zu returns RM_ERR_UNSUPPORTED_VERSION with version %d", i,
+             expected[i]);
+    rm_page_free(p);
+  }
 }
 
 /* The widest column that stands on a sheet with a margin. The rule is not "no
@@ -221,6 +252,32 @@ static void the_version_string_is_spelled_from_its_numbers(void) {
            RMLINES_VERSION_STRING, expected);
 }
 
+static void null_model_queries_are_safe(void) {
+  RM_CHECK(rm_paragraph_format_style(nullptr) == RM_PARA_UNKNOWN,
+           "null format style");
+  RM_CHECK(!rm_paragraph_format_has_further_fields(nullptr),
+           "null format further fields");
+  RM_CHECK(rm_paragraph_format_heading_level(nullptr) == 0,
+           "null format heading level");
+  RM_CHECK(rm_paragraph_format_level(nullptr) == 1, "null format level");
+  RM_CHECK(!rm_paragraph_format_is_ticked(nullptr), "null format ticked");
+  RM_CHECK(!rm_paragraph_format_has_ticked_nested_items(nullptr),
+           "null format ticked nested");
+
+  int version = 77;
+  RM_CHECK(!rm_header_version(nullptr, 43, &version) && version == 77,
+           "null header returns false");
+
+  RM_CHECK(rm_item_id_format((rm_item_id){1, 2}, nullptr, 0) == 3,
+           "null buffer with zero size still measures length");
+  RM_CHECK(rm_item_id_format((rm_item_id){1, 2}, nullptr, 16) == -1,
+           "null buffer with nonzero size returns -1 safely");
+
+  rm_text_block broken_text = {.paragraphs = nullptr, .paragraph_count = 1};
+  RM_CHECK(rm_text_block_checkbox_state(&broken_text, 0) == RM_CHECKBOX_NONE,
+           "null paragraphs array returns RM_CHECKBOX_NONE");
+}
+
 int main(void) {
   the_version_string_is_spelled_from_its_numbers();
   the_version_is_read_out_of_the_header();
@@ -231,5 +288,6 @@ int main(void) {
   an_unknown_style_survives_as_its_raw_value();
   list_families_group_the_styles();
   the_tools_answer_the_two_questions_about_them();
+  null_model_queries_are_safe();
   return rm_test_report("model");
 }

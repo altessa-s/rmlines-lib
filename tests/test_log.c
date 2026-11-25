@@ -18,10 +18,12 @@ typedef struct collected {
   rm_log_level levels[32];
   char lines[32][512];
   size_t count;
+  size_t total;
 } collected;
 
 static void collect(rm_log_level level, const char* message, void* context) {
   collected* into = context;
+  into->total += 1;
   if (into->count >= 32) return;
   into->levels[into->count] = level;
   snprintf(into->lines[into->count], sizeof into->lines[0], "%s", message);
@@ -162,6 +164,25 @@ static void a_lost_group_item_reaches_the_sink_as_an_error(void) {
   rm_bytes_free(bytes);
 }
 
+static void install_and_silence_are_allocation_free(void) {
+  /* Allocation-freeness of rm_log_install / rm_log_silence / rm_log_wanted is
+   * enforced at compile time via #pragma GCC poison in src/rm_log.c; this test
+   * exercises 64 alternating install/silence/write cycles end-to-end. */
+  collected seen_a = {0}, seen_b = {0};
+  for (int i = 0; i < 64; ++i) {
+    collected* target = (i & 1) == 0 ? &seen_a : &seen_b;
+    rm_log_install(collect, target);
+    RM_CHECK(rm_log_wanted(), "sink active at cycle %d", i);
+    rm_log_writef(RM_LOG_DEBUG, "cycle %d", i);
+    rm_log_silence();
+    RM_CHECK(!rm_log_wanted(), "sink silenced at cycle %d", i);
+  }
+  RM_CHECK_EQ_SIZE(seen_a.total, 32,
+                   "even cycles delivered 32 callbacks to seen_a");
+  RM_CHECK_EQ_SIZE(seen_b.total, 32,
+                   "odd cycles delivered 32 callbacks to seen_b");
+}
+
 int main(void) {
   an_installed_sink_receives_the_line_with_its_level();
   a_long_line_arrives_whole();
@@ -170,5 +191,6 @@ int main(void) {
   a_lost_stroke_reaches_the_sink_as_an_error();
   a_lost_image_reaches_the_sink_as_an_error();
   a_lost_group_item_reaches_the_sink_as_an_error();
+  install_and_silence_are_allocation_free();
   return rm_test_report("log");
 }

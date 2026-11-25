@@ -41,19 +41,21 @@ typedef enum rm_log_level : int {
   RM_LOG_ERROR,
 } rm_log_level;
 
-/* What a host installs. Called on whichever thread parsed the page — the
- * parser runs wherever the work is, and a sink that touches shared state must
- * say so itself. `message` is NUL-terminated and is not owned by the sink: it
- * lives only for the duration of the call. */
+/* What a host installs. Thread-safe across all library entry points
+ * (`rm_parse_page`, `rm_highlighter_items`, `rm_edit_*`). `context` must stay
+ * valid across all concurrent library calls and may still be observed by an
+ * in-flight call even after `rm_log_silence()` returns. `message` is
+ * NUL-terminated and is not owned by the sink: it lives only for the duration
+ * of the call. */
 typedef void (*rm_log_sink)(rm_log_level level, const char* message,
                             void* context);
 
-/* Name the sink for this process. Once, at its start, from the composition
- * root; a later call replaces the earlier one. */
+/* Name the sink for this process without dynamic allocation. Calling with
+ * `sink == nullptr` is equivalent to `rm_log_silence()`. */
 RM_API void rm_log_install(rm_log_sink sink, void* context);
 
-/* Go back to silence. For a test that installed a sink and must not leave it
- * behind for the next one. */
+/* Go back to silence without dynamic allocation. For a test or host cleanup
+ * that must stop routing new messages to the sink. */
 RM_API void rm_log_silence(void);
 
 #ifdef __cplusplus

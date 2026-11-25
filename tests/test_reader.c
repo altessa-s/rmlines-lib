@@ -197,6 +197,57 @@ static void subblocks_and_string_counts_stay_bounded(void) {
   rm_arena_destroy(arena);
 }
 
+static void utf8_and_vec_bounds_are_safe(void) {
+  char* one = malloc(1);
+  one[0] = 'a';
+  uint32_t scalar = 0;
+  RM_CHECK_EQ_SIZE(rm_utf8_next(one, 1, 1, &scalar), 1,
+                   "utf8_next at end does not read past buffer");
+  RM_CHECK(scalar == 0xFFFDu, "utf8_next at end yields replacement char");
+  scalar = 123;
+  RM_CHECK_EQ_SIZE(rm_utf8_next(one, 1, 5, &scalar), 1,
+                   "utf8_next past end clamps return offset to length");
+  RM_CHECK(scalar == 0xFFFDu, "utf8_next past end yields replacement char");
+  RM_CHECK_EQ_SIZE(rm_utf8_next(one, 1, 1, nullptr), 1,
+                   "utf8_next at end with null out_scalar returns length");
+  RM_CHECK_EQ_SIZE(rm_utf8_next(one, 1, 9, nullptr), 1,
+                   "utf8_next past end with null out_scalar returns length");
+  free(one);
+
+  rm_vec v;
+  rm_vec_init(&v, 0);
+  RM_CHECK(!rm_vec_reserve(&v, 1), "zero-element vec refuses reserve");
+  rm_vec_free(&v);
+
+  /* Valid UTF-8 fast path in rm_read_string guarantees NUL-termination for
+   * empty strings, exact-end wire payloads, and strings immediately followed by
+   * a non-zero tag byte (R81, R161). */
+  rm_arena* arena = rm_arena_create();
+  RM_CHECK(arena != nullptr, "arena");
+  const uint8_t empty_wire[] = {0x00, 0x01};
+  rm_reader r;
+  rm_str out = {0};
+  rm_reader_init(&r, empty_wire, sizeof empty_wire);
+  RM_CHECK(rm_read_string(&r, sizeof empty_wire, arena, &out) == RM_OK &&
+               out.length == 0 && out.bytes[out.length] == '\0',
+           "empty valid-UTF-8 string is NUL-terminated");
+
+  const uint8_t exact_wire[] = {0x05, 0x01, 'H', 'e', 'l', 'l', 'o'};
+  rm_reader_init(&r, exact_wire, sizeof exact_wire);
+  RM_CHECK(rm_read_string(&r, sizeof exact_wire, arena, &out) == RM_OK &&
+               out.length == 5 && memcmp(out.bytes, "Hello", 5) == 0 &&
+               out.bytes[out.length] == '\0',
+           "exact-end valid-UTF-8 string is NUL-terminated");
+
+  const uint8_t tagged_wire[] = {0x03, 0x01, 'a', 'b', 'c', 0x24};
+  rm_reader_init(&r, tagged_wire, sizeof tagged_wire);
+  RM_CHECK(rm_read_string(&r, sizeof tagged_wire - 1u, arena, &out) == RM_OK &&
+               out.length == 3 && memcmp(out.bytes, "abc", 3) == 0 &&
+               out.bytes[out.length] == '\0' && r.offset == 5,
+           "valid-UTF-8 string followed by non-zero tag is NUL-terminated");
+  rm_arena_destroy(arena);
+}
+
 int main(void) {
   subblocks_and_string_counts_stay_bounded();
   the_widest_varuint_reads_back_whole();
@@ -207,5 +258,6 @@ int main(void) {
   a_tag_with_a_huge_index_is_an_unknown_field();
   a_string_is_counted_in_bytes_and_clamped_to_its_field();
   broken_utf8_is_repaired_by_maximal_subpart();
+  utf8_and_vec_bounds_are_safe();
   return rm_test_report("reader");
 }

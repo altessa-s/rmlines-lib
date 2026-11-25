@@ -55,8 +55,9 @@ rm_edit_set_node_visible(rm_edit_session* session, rm_item_id node,
                          rm_item_id stamp, bool visible, rm_error* error);
 
 /* Insert a stroke between scene items in a node. {0,0} denotes the
- * beginning or end. The caller reserves a fresh page-wide counter under
- * its registered author for id, including across concurrent sessions. */
+ * beginning or end. Enforces the same tool-aware palette/`has_argb`/thickness
+ * rules as `rm_write_page`. The caller reserves a fresh page-wide counter
+ * under its registered author for id, including across concurrent sessions. */
 [[nodiscard]] RM_API rm_status rm_edit_insert_stroke(
     rm_edit_session* session, rm_item_id parent, rm_item_id id, rm_item_id left,
     rm_item_id right, const rm_draft_stroke* stroke, rm_error* error);
@@ -66,9 +67,19 @@ rm_edit_set_node_visible(rm_edit_session* session, rm_item_id node,
  * starting at first_new, under the caller's registered author. When both
  * removing and inserting scalars, reserve one additional ID at the end for
  * the operation's anchor stamp. It must be newer than every anchor stamp
- * being replaced. Pure deletion consumes no IDs. A text anchor
- * follows the replacement scalar at the same index within the range. If
- * that scalar is absent, the edit returns RM_ERR_UNVERIFIED atomically. */
+ * being replaced. Pure deletion consumes no IDs.
+ *
+ * On pages with multiple RootText blocks, the edit uses the last block
+ * the parser displays (one with a finite text origin).
+ *
+ * Node anchors are tracked across all live-tree nodes (including hidden
+ * layers; `0x01`-removed nodes are exempt from pure-deletion
+ * `RM_ERR_UNVERIFIED`). Typed-text `0x03` highlights on live-tree nodes are
+ * verified atomically and refuse with `RM_ERR_UNVERIFIED` on interior
+ * mutation/insertion, earlier layout or placement changes, ambiguous/invalid
+ * Form-2 endpoints, deleted exclusive EOF endpoints, or trailing-boundary
+ * shaping changes not separated by an untouched safe break or verified
+ * break-to-newline. */
 [[nodiscard]] RM_API rm_status rm_edit_replace_text(
     rm_edit_session* session, size_t start, size_t remove_count,
     const char* utf8, rm_item_id first_new, rm_error* error);
@@ -113,14 +124,17 @@ typedef struct rm_edit_transform {
 } rm_edit_transform;
 
 /* Transform a stroke or cut a half-open range of its recorded samples.
- * Each edit tombstones the original. Reserve one fresh ID for a transform
- * and up to two consecutive IDs for the surviving pieces of a cut.
- * Both keep the parent node and its text anchor. */
+ * Singular affine transforms (`det == 0.0`) are refused with
+ * `RM_ERR_INVALID_ARGUMENT`. Each edit tombstones the original. Reserve one
+ * fresh ID for a transform and up to two consecutive IDs for the surviving
+ * pieces of a cut. Both keep the parent node and its text anchor. */
 [[nodiscard]] RM_API rm_status rm_edit_transform_stroke(
     rm_edit_session* session, rm_item_id stroke, rm_item_id fresh,
     rm_edit_transform transform, rm_error* error);
 /* Apply one affine transform to a selection in a single undo step. Caller
- * reserves count consecutive IDs. A missing item leaves the revision intact. */
+ * reserves count consecutive IDs. Repeated stroke IDs return
+ * RM_ERR_INVALID_ARGUMENT. The transform must be finite and nonsingular even
+ * for an empty selection. A missing item leaves the revision intact. */
 [[nodiscard]] RM_API rm_status rm_edit_transform_strokes(
     rm_edit_session* session, const rm_item_id* strokes, size_t count,
     rm_item_id first_new, rm_edit_transform transform, rm_error* error);

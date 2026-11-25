@@ -53,20 +53,24 @@ jobs:
       - name: Test
         run: cmake --build build --target check
 
-      # The contract and nothing else: the arena, the hash map and the byte
-      # reader are hidden, so a consumer cannot link against plumbing that is
-      # free to change.
+      # The contract and nothing else: unfiltered external symbols must be
+      # exactly the 50 public `rm_*` entry points (no `rmi_*` plumbing leaks).
       - name: Check the exported symbols
         if: matrix.shared
         run: |
           if [ "${{ runner.os }}" = "macOS" ]; then
-            exported=$(nm -gU build/librmlines.dylib | awk '{print $3}' | sed 's/^_//' | grep '^rm_' | sort)
+            exported=$(nm -gUj build/librmlines.dylib | sed 's/^_//' | grep -v '^$' | LC_ALL=C sort)
           else
-            exported=$(nm -D --defined-only build/librmlines.so | awk '{print $3}' | grep '^rm_' | sort)
+            exported=$(nm -D --defined-only build/librmlines.so | awk '{print $3}' | grep -v '^$' | LC_ALL=C sort)
           fi
           echo "$exported"
           count=$(echo "$exported" | wc -l)
-          test "$count" -eq 50 || { echo "expected 50 exported functions, found $count"; exit 1; }
+          test "$count" -eq 50 || { echo "expected 50 exported symbols, found $count"; exit 1; }
+          if echo "$exported" | grep -qv '^rm_'; then
+            echo "unexpected non-public exported symbol(s):"
+            echo "$exported" | grep -v '^rm_'
+            exit 1
+          fi
 
       # `-std=c2x` and not `-std=c23`: the two name one standard, and gcc 13 —
       # the runner's gcc — knows only the older spelling. Every compiler CI
@@ -158,13 +162,15 @@ jobs:
             -DRMLINES_BUILD_FUZZERS=ON \
             -DCMAKE_C_FLAGS="-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
       - name: Build
-        run: cmake --build build --target fuzz_parse
+        run: cmake --build build --target fuzz_parse fuzz_edit
       - name: Run
         run: |
           mkdir -p corpus
           cp tests/fixtures/v6-samples/*.rm tests/fixtures/*.rm corpus/
           ./build/fuzz_parse corpus \
-            -max_total_time=120 -max_len=65536 -print_final_stats=1
+            -max_total_time=60 -max_len=65536 -print_final_stats=1
+          ./build/fuzz_edit corpus \
+            -max_total_time=60 -max_len=65536 -print_final_stats=1
       - name: Keep whatever crashed
         if: failure()
         uses: actions/upload-artifact@v7
@@ -174,6 +180,8 @@ jobs:
             crash-*
             leak-*
             timeout-*
+            oom-*
+            slow-unit-*
           if-no-files-found: ignore
   format:
     runs-on: ubuntu-24.04
@@ -186,3 +194,23 @@ jobs:
       # keeps generated and third-party files out.
       - run: python3 -m pip install clang-format==21.1.8
       - run: git ls-files '*.c' '*.h' | xargs clang-format --dry-run --Werror
+
+  arch-checks:
+    name: Include and threading checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify include boundaries and threading isolation
+        run: |
+          if grep -rn 'rm_internal\.h' src/; then
+            echo "Production source includes rm_internal.h"
+            exit 1
+          fi
+          if grep -rnE 'writer\.h|rm_wire_write\.h' src/rm_parser.c src/rm_scene.c src/rm_scene_query.c src/rm_crdt.c; then
+            echo "Reader includes a writer header"
+            exit 1
+          fi
+          if grep -rn 'pthread' include/ src/; then
+            echo "Unexpected pthread dependency"
+            exit 1
+          fi

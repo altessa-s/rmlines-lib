@@ -7,9 +7,9 @@
  * consumer has to keep its own table of the tablet's numbers. */
 
 #include <stdio.h>
+#include <string.h>
 
-#include "rm_internal.h"
-#include "rmlines/parser.h"
+#include "rm_model_internal.h"
 
 const char* rm_status_string(rm_status status) {
   switch (status) {
@@ -27,6 +27,7 @@ const char* rm_status_string(rm_status status) {
       return "out of memory";
     case RM_ERR_ANCHOR_OUT_OF_RANGE:
       return "an anchor names a paragraph the draft has not got";
+
     case RM_ERR_TOO_MANY_TO_NUMBER:
       return "more items than a page's counters can name";
     case RM_ERR_INVALID_ARGUMENT:
@@ -48,13 +49,14 @@ bool rm_item_id_equal(rm_item_id a, rm_item_id b) {
 }
 
 int rm_item_id_format(rm_item_id id, char* out, size_t size) {
+  if (out == nullptr && size != 0) return -1;
   return snprintf(out, size, "%u:%llu", (unsigned)id.author,
                   (unsigned long long)id.counter);
 }
 
 /* Digits, into a number no wider than `limit` — read strictly as an unsigned
- * integer out of a string: one leading sign is allowed, a minus only
- * on a nought. Written out rather than left to `strtoull`, which takes leading
+ * integer out of a string: one leading sign is allowed, a minus only on a
+ * nought. Written out rather than left to `strtoull`, which takes leading
  * blanks, a minus on anything and a wrap past the top as a number all the
  * same. */
 static bool parse_decimal(const char* text, size_t length, uint64_t limit,
@@ -93,6 +95,111 @@ bool rm_item_id_parse(const char* text, rm_item_id* out) {
   return true;
 }
 
+bool rmi_pen_tool_valid(rm_pen_tool tool) {
+  switch (tool) {
+    case RM_TOOL_PAINTBRUSH_1:
+    case RM_TOOL_PENCIL_1:
+    case RM_TOOL_BALLPOINT_1:
+    case RM_TOOL_MARKER_1:
+    case RM_TOOL_FINELINER_1:
+    case RM_TOOL_HIGHLIGHTER_1:
+    case RM_TOOL_ERASER:
+    case RM_TOOL_MECHANICAL_PENCIL_1:
+    case RM_TOOL_ERASER_AREA:
+    case RM_TOOL_PAINTBRUSH_2:
+    case RM_TOOL_MECHANICAL_PENCIL_2:
+    case RM_TOOL_PENCIL_2:
+    case RM_TOOL_BALLPOINT_2:
+    case RM_TOOL_MARKER_2:
+    case RM_TOOL_FINELINER_2:
+    case RM_TOOL_HIGHLIGHTER_2:
+    case RM_TOOL_CALIGRAPHY:
+    case RM_TOOL_MASKED_ERASER:
+    case RM_TOOL_SHADER:
+      return true;
+
+    case RM_TOOL_UNKNOWN:
+    default:
+      return false;
+  }
+}
+
+bool rmi_pen_color_valid(rm_pen_color color) {
+  return (int32_t)color >= (int32_t)RM_COLOR_BLACK &&
+         (int32_t)color <= (int32_t)RM_COLOR_HIGHLIGHTER_GRAY;
+}
+
+bool rmi_pen_thickness_valid(rm_pen_tool tool, double thickness) {
+  if (rm_pen_tool_is_highlighter(tool)) return thickness == 1.0;
+  return thickness == 1.0 || thickness == 2.0 || thickness == 3.0;
+}
+
+/* The custom-colour slot needs a colour value. Ordinary palette entries and
+ * the shader have different rules for that value. */
+bool rmi_stroke_color_valid(rm_pen_tool tool, rm_pen_color color,
+                            bool has_argb) {
+  if (!rmi_pen_tool_valid(tool) || !rmi_pen_color_valid(color)) return false;
+  if (tool == RM_TOOL_SHADER) {
+    return color == RM_COLOR_HIGHLIGHT && has_argb;
+  }
+  if (rm_pen_tool_is_highlighter(tool)) {
+    if (color == RM_COLOR_HIGHLIGHT) return has_argb;
+    if (has_argb) return false;
+    switch (color) {
+      case RM_COLOR_YELLOW:
+      case RM_COLOR_GREEN:
+      case RM_COLOR_PINK:
+      case RM_COLOR_GRAY_OVERLAP:
+      case RM_COLOR_HIGHLIGHTER_BLUE:
+      case RM_COLOR_HIGHLIGHTER_ORANGE:
+      case RM_COLOR_HIGHLIGHTER_GRAY:
+        return true;
+      default:
+        return false;
+    }
+  }
+  if (rm_pen_tool_is_eraser(tool)) {
+    return !has_argb && color != RM_COLOR_HIGHLIGHT;
+  }
+  if (has_argb) return false;
+
+  switch (color) {
+    case RM_COLOR_BLACK:
+    case RM_COLOR_GRAY:
+    case RM_COLOR_WHITE:
+    case RM_COLOR_BLUE:
+    case RM_COLOR_RED:
+    case RM_COLOR_GREEN_2:
+    case RM_COLOR_CYAN:
+    case RM_COLOR_MAGENTA:
+    case RM_COLOR_YELLOW_2:
+      return true;
+    default:
+      return false;
+  }
+}
+
+/* Automatic column width follows the screen dimensions. Use medium when the
+ * setting or the screen supplies no usable choice. */
+float rmi_resolved_column_width(uint64_t setting, uint32_t screen_width,
+                                uint32_t screen_height) {
+  rm_text_column choice = RM_COLUMN_MEDIUM;
+  if (setting <= 2u) {
+    choice = (rm_text_column)setting;
+  } else if (setting == 4u && screen_width != 0 && screen_height != 0) {
+    choice = screen_width < 1000u   ? RM_COLUMN_NARROW
+             : screen_width < 1500u ? RM_COLUMN_MEDIUM
+                                    : RM_COLUMN_WIDE;
+  }
+  return rm_text_column_width(choice);
+}
+
+bool rmi_uuid_is_nil(const uint8_t uuid[16]) {
+  static constexpr uint8_t NIL_UUID[16] = {0};
+  if (uuid == nullptr) return true;
+  return memcmp(uuid, NIL_UUID, sizeof NIL_UUID) == 0;
+}
+
 bool rm_pen_tool_is_eraser(rm_pen_tool tool) {
   return tool == RM_TOOL_ERASER || tool == RM_TOOL_ERASER_AREA ||
          tool == RM_TOOL_MASKED_ERASER;
@@ -124,8 +231,11 @@ bool rm_paragraph_style_is_list_item(rm_paragraph_style style) {
   return rm_paragraph_style_list_family(style) != RM_LIST_NONE;
 }
 
+/* Extra style fields distinguish paragraphs that share the same first byte,
+ * including the second heading and nested lists. */
 rm_paragraph_style rm_paragraph_format_style(
     const rm_paragraph_format* format) {
+  if (format == nullptr) return RM_PARA_UNKNOWN;
   switch (format->raw) {
     case 0:
       return RM_PARA_BASIC;
@@ -141,6 +251,7 @@ rm_paragraph_style rm_paragraph_format_style(
       return RM_PARA_BULLET_NESTED;
     case 6:
       return RM_PARA_CHECKBOX;
+
     case 7:
       return RM_PARA_CHECKBOX_CHECKED;
     case 8:
@@ -159,10 +270,12 @@ rm_paragraph_style rm_paragraph_format_style(
 }
 
 bool rm_paragraph_format_has_further_fields(const rm_paragraph_format* format) {
+  if (format == nullptr) return false;
   return format->has_second || format->has_third;
 }
 
 int rm_paragraph_format_heading_level(const rm_paragraph_format* format) {
+  if (format == nullptr) return 0;
   switch (rm_paragraph_format_style(format)) {
     case RM_PARA_HEADING:
       return 1;
@@ -174,6 +287,7 @@ int rm_paragraph_format_heading_level(const rm_paragraph_format* format) {
 }
 
 int rm_paragraph_format_level(const rm_paragraph_format* format) {
+  if (format == nullptr) return 1;
   if (!rm_paragraph_style_is_list_item(rm_paragraph_format_style(format)))
     return 1;
   if (!format->has_third) return 1;
@@ -191,6 +305,7 @@ static bool is_checkbox(const rm_paragraph_format* format) {
 }
 
 bool rm_paragraph_format_is_ticked(const rm_paragraph_format* format) {
+  if (format == nullptr) return false;
   rm_paragraph_style style = rm_paragraph_format_style(format);
   if (style == RM_PARA_CHECKBOX_CHECKED ||
       style == RM_PARA_CHECKBOX_CHECKED_NESTED)
@@ -201,13 +316,15 @@ bool rm_paragraph_format_is_ticked(const rm_paragraph_format* format) {
 
 bool rm_paragraph_format_has_ticked_nested_items(
     const rm_paragraph_format* format) {
+  if (format == nullptr) return false;
   return is_checkbox(format) && format->has_third &&
          (format->third & TICKED_NESTED_BIT) != 0;
 }
 
 rm_checkbox_state rm_text_block_checkbox_state(const rm_text_block* text,
                                                size_t paragraph) {
-  if (text == nullptr || paragraph >= text->paragraph_count)
+  if (text == nullptr || text->paragraphs == nullptr ||
+      paragraph >= text->paragraph_count)
     return RM_CHECKBOX_NONE;
   const rm_paragraph* line = &text->paragraphs[paragraph];
   if (!line->has_format || !is_checkbox(&line->format)) return RM_CHECKBOX_NONE;
@@ -269,25 +386,4 @@ rm_text_column rm_text_column_widest_fitting(double sheet_width) {
     if ((double)rm_text_column_width(all[i]) <= usable) widest = all[i];
   }
   return widest;
-}
-
-bool rm_header_version(const char* header, size_t length, int* out_version) {
-  constexpr size_t prefix = sizeof(RM_HEADER_PREFIX) - 1u;
-  if (length < prefix) return false;
-  if (memcmp(header, RM_HEADER_PREFIX, prefix) != 0) return false;
-
-  /* A single leading digit is what the format writes; the padding spaces
-   * behind it stop the scan. An empty run means the header only looks like
-   * one. */
-  size_t at = prefix;
-  long value = 0;
-  size_t digits = 0;
-  while (at < length && header[at] >= '0' && header[at] <= '9') {
-    if (value < 1000000L) value = value * 10 + (header[at] - '0');
-    digits += 1;
-    at += 1;
-  }
-  if (digits == 0) return false;
-  if (out_version != nullptr) *out_version = (int)value;
-  return true;
 }

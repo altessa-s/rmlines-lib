@@ -45,6 +45,7 @@
                           .height = 160};
   for (uint8_t i = 0; i < 16; i += 1) image.key[i] = i;
   rm_page_draft draft = {
+      .author = {1},
       .sheet = {1404, 1872, 1404, 1872},
       .column = {936, 1},
       .images = &image,
@@ -91,6 +92,7 @@
                             .points = points,
                             .point_count = 2};
   rm_page_draft draft = {
+      .author = {1},
       .sheet = {1404, 1872, 1404, 1872},
       .column = {936, 1},
       .strokes = &stroke,

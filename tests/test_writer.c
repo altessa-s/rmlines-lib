@@ -7,8 +7,12 @@
  * writer's proof; the other half is the device, because only the tablet can
  * say a page is acceptable. */
 
+#include <float.h>
+#include <limits.h>
+#include <math.h>
 #include <stdlib.h>
 
+#include "rm_internal.h"
 #include "rm_test.h"
 #include "rmlines/rmlines.h"
 
@@ -779,8 +783,8 @@ static void a_count_without_its_items_is_refused(void) {
       {"images", 0, 0, 0, 2},
   };
   for (size_t i = 0; i < sizeof cases / sizeof *cases; i += 1) {
-    rm_page_draft draft = {.sheet = {1404, 1872, 1404, 1872},
-                           .column = {936, 1}};
+    rm_page_draft draft = {
+        .author = {1}, .sheet = {1404, 1872, 1404, 1872}, .column = {936, 1}};
     draft.paragraph_count = cases[i].paragraphs;
     draft.stroke_count = cases[i].strokes;
     draft.mark_count = cases[i].marks;
@@ -800,7 +804,8 @@ static void a_count_without_its_items_is_refused(void) {
 
   /* The other half of the rule: nought and null together are an empty page,
    * not a refusal. */
-  rm_page_draft empty = {.sheet = {1404, 1872, 1404, 1872}, .column = {936, 1}};
+  rm_page_draft empty = {
+      .author = {1}, .sheet = {1404, 1872, 1404, 1872}, .column = {936, 1}};
   uint8_t* bytes = nullptr;
   size_t size = 0;
   rm_error error;
@@ -860,8 +865,8 @@ static void missing_point_arrays_are_refused(void) {
                               .point_count = 1};
     rm_draft_mark mark = {.anchor = {.kind = RM_ANCHOR_BEFORE_TEXT},
                           .stroke = stroke};
-    rm_page_draft draft = {.sheet = {1404, 1872, 1404, 1872},
-                           .column = {936, 1}};
+    rm_page_draft draft = {
+        .author = {1}, .sheet = {1404, 1872, 1404, 1872}, .column = {936, 1}};
     if (anchored) {
       draft.marks = &mark;
       draft.mark_count = 1;
@@ -892,6 +897,1018 @@ static void missing_point_arrays_are_refused(void) {
   }
 }
 
+static void invalid_writer_inputs_are_refused(void) {
+  uint8_t* bytes = nullptr;
+  size_t size = 0;
+  rm_error error;
+
+  /* Embedded newline in paragraph text is prohibited by writer.h. */
+  rm_draft_paragraph bad_para[] = {{.text = "line1\nline2"}};
+  rm_page_draft d1 = sample_draft();
+  d1.paragraphs = bad_para;
+  d1.paragraph_count = 1;
+  d1.marks = nullptr;
+  d1.mark_count = 0;
+  RM_CHECK(rm_write_page(&d1, &bytes, &size, &error) == RM_ERR_INVALID_ARGUMENT,
+           "embedded newline in paragraph is refused");
+  rm_bytes_free(bytes);
+  bytes = nullptr;
+
+  rm_draft_paragraph bad_cr[] = {{.text = "line1\rline2"}};
+  d1.paragraphs = bad_cr;
+  rm_page* cr_page = round_trip(&d1);
+  RM_CHECK(cr_page && cr_page->text.paragraph_count == 1,
+           "carriage return stays in one paragraph");
+  if (cr_page && cr_page->text.paragraph_count == 1) {
+    rm_str text = cr_page->text.paragraphs[0].text;
+    RM_CHECK_EQ_STR(text.bytes, text.length, bad_cr[0].text,
+                    "carriage return round-trips");
+  }
+  rm_page_free(cr_page);
+
+  /* Non-finite floats in stroke/point/image/sheet/column/mark are refused. */
+  rm_draft_point bad_pt = rm_draft_point_make(NAN, 0);
+  rm_draft_stroke bad_stroke =
+      rm_draft_stroke_make(RM_TOOL_FINELINER_2, RM_COLOR_BLACK, &bad_pt, 1);
+  rm_page_draft d2 = sample_draft();
+  d2.strokes = &bad_stroke;
+  d2.stroke_count = 1;
+  d2.marks = nullptr;
+  d2.mark_count = 0;
+  RM_CHECK(rm_write_page(&d2, &bytes, &size, &error) == RM_ERR_INVALID_ARGUMENT,
+           "NaN point coordinate is refused");
+  rm_bytes_free(bytes);
+  bytes = nullptr;
+
+  rm_draft_point good_pt = rm_draft_point_make(0, 0);
+  rm_draft_stroke bad_thick =
+      rm_draft_stroke_make(RM_TOOL_FINELINER_2, RM_COLOR_BLACK, &good_pt, 1);
+  bad_thick.thickness = INFINITY;
+  d2.strokes = &bad_thick;
+  RM_CHECK(rm_write_page(&d2, &bytes, &size, &error) == RM_ERR_INVALID_ARGUMENT,
+           "Inf stroke thickness is refused");
+  rm_bytes_free(bytes);
+  bytes = nullptr;
+
+  rm_page_draft d_tool = sample_draft();
+  d_tool.marks = nullptr;
+  d_tool.mark_count = 0;
+  rm_draft_stroke bad_tool =
+      rm_draft_stroke_make(RM_TOOL_UNKNOWN, RM_COLOR_BLACK, &good_pt, 1);
+  d_tool.strokes = &bad_tool;
+  d_tool.stroke_count = 1;
+  RM_CHECK(
+      rm_write_page(&d_tool, &bytes, &size, &error) == RM_ERR_INVALID_ARGUMENT,
+      "unknown pen tool is refused");
+  rm_bytes_free(bytes);
+  bytes = nullptr;
+
+  rm_draft_stroke bad_color =
+      rm_draft_stroke_make(RM_TOOL_FINELINER_2, (rm_pen_color)999, &good_pt, 1);
+  d_tool.strokes = &bad_color;
+  RM_CHECK(
+      rm_write_page(&d_tool, &bytes, &size, &error) == RM_ERR_INVALID_ARGUMENT,
+      "invalid pen color is refused");
+  rm_bytes_free(bytes);
+  bytes = nullptr;
+
+  rm_page_draft d3 = sample_draft();
+  d3.marks = nullptr;
+  d3.mark_count = 0;
+  d3.sheet.canvas_width = NAN;
+  RM_CHECK(rm_write_page(&d3, &bytes, &size, &error) == RM_ERR_INVALID_ARGUMENT,
+           "NaN sheet canvas_width is refused");
+  rm_bytes_free(bytes);
+  bytes = nullptr;
+
+  rm_page_draft d4 = sample_draft();
+  d4.marks = nullptr;
+  d4.mark_count = 0;
+  d4.column.width = -1.0f;
+  RM_CHECK(rm_write_page(&d4, &bytes, &size, &error) == RM_ERR_INVALID_ARGUMENT,
+           "non-positive column width is refused");
+  rm_bytes_free(bytes);
+  bytes = nullptr;
+
+  rm_draft_image bad_img = {
+      .file = "a.png", .x = NAN, .width = 10, .height = 10};
+  rm_page_draft d5 = sample_draft();
+  d5.marks = nullptr;
+  d5.mark_count = 0;
+  d5.images = &bad_img;
+  d5.image_count = 1;
+  RM_CHECK(rm_write_page(&d5, &bytes, &size, &error) == RM_ERR_INVALID_ARGUMENT,
+           "NaN image coordinate is refused");
+  rm_bytes_free(bytes);
+  bytes = nullptr;
+
+  rm_draft_image empty_name = {.file = "", .width = 10, .height = 10};
+  d5.images = &empty_name;
+  RM_CHECK(rm_write_page(&d5, &bytes, &size, &error) == RM_ERR_INVALID_ARGUMENT,
+           "empty image filename is refused");
+  rm_bytes_free(bytes);
+  bytes = nullptr;
+
+  rm_draft_image dup_imgs[2] = {
+      {.key = {1}, .file = "a.png", .width = 10, .height = 10},
+      {.key = {1}, .file = "b.png", .width = 10, .height = 10},
+  };
+  d5.images = dup_imgs;
+  d5.image_count = 2;
+  RM_CHECK(rm_write_page(&d5, &bytes, &size, &error) == RM_ERR_INVALID_ARGUMENT,
+           "duplicate image keys with different filenames are refused");
+  rm_bytes_free(bytes);
+  bytes = nullptr;
+
+  rm_draft_mark bad_mark = {
+      .anchor = {.kind = RM_ANCHOR_BEFORE_TEXT},
+      .pen_origin = INFINITY,
+      .stroke = rm_draft_stroke_make(RM_TOOL_FINELINER_2, RM_COLOR_BLACK,
+                                     &good_pt, 1)};
+  rm_page_draft d6 = sample_draft();
+  d6.marks = &bad_mark;
+  d6.mark_count = 1;
+  RM_CHECK(rm_write_page(&d6, &bytes, &size, &error) == RM_ERR_INVALID_ARGUMENT,
+           "Inf mark pen_origin is refused");
+  rm_bytes_free(bytes);
+  bytes = nullptr;
+}
+
+static bool find_block_payload(const uint8_t* bytes, size_t size, uint8_t type,
+                               rm_reader* out_body) {
+  rm_reader r;
+  rm_reader_init(&r, bytes, size);
+  r.offset = RM_HEADER_LENGTH;
+  while (rm_reader_remaining(&r) >= 8) {
+    rm_block_header hdr;
+    if (rm_read_block_header(&r, &hdr) != RM_OK) return false;
+    if (hdr.type == type) {
+      rm_reader body = r;
+      body.size = hdr.end;
+      *out_body = body;
+      return true;
+    }
+    r.offset = hdr.end;
+  }
+  return false;
+}
+
+static void fresh_stroke_tail_matches_its_colour(void) {
+  rm_draft_point point = rm_draft_point_make(0, 0);
+  for (unsigned explicit_colour = 0; explicit_colour <= 1; ++explicit_colour) {
+    rm_draft_stroke stroke = rm_draft_stroke_make(
+        RM_TOOL_HIGHLIGHTER_2,
+        explicit_colour ? RM_COLOR_HIGHLIGHT : RM_COLOR_YELLOW, &point, 1);
+    stroke.thickness = 1.0;
+
+    rm_buf tail = {0};
+    if (explicit_colour) {
+      stroke.has_argb = true;
+      stroke.argb = 0xFFBEEAFEu;
+      rm_write_id(&tail, 6, RM_CRDT_NONE);
+      rm_write_tag(&tail, 8, RM_TAG_BYTE4);
+      rm_write_u32(&tail, stroke.argb);
+    }
+
+    rm_page_draft draft = {
+        .author = {1}, .strokes = &stroke, .stroke_count = 1};
+    uint8_t* bytes = nullptr;
+    size_t size = 0;
+    RM_CHECK(rm_write_page(&draft, &bytes, &size, nullptr) == RM_OK,
+             "write fresh highlighter");
+    rm_reader body, value;
+    rm_item_preamble pre;
+    uint8_t kind;
+    bool found =
+        bytes &&
+        find_block_payload(bytes, size, RM_BLOCK_SCENE_LINE_ITEM, &body) &&
+        rm_parse_item_preamble(&body, &pre) == RM_OK &&
+        rm_expect_tag(&body, 6, RM_TAG_LENGTH4) == RM_OK &&
+        rm_read_subblock(&body, &value) == RM_OK &&
+        rm_read_u8(&value, &kind) == RM_OK && kind == RM_VALUE_LINE_ITEM;
+    for (uint32_t i = 1; found && i <= 5; ++i) {
+      uint32_t tag;
+      uint8_t type;
+      found = rm_read_tag(&value, &tag, &type) == RM_OK && tag == i &&
+              rmi_skip_tagged_value(&value, type, nullptr) == RM_OK;
+    }
+    RM_CHECK(found && rm_reader_remaining(&value) == tail.count &&
+                 (!tail.count || memcmp(value.data + value.offset, tail.bytes,
+                                        tail.count) == 0),
+             "fresh stroke has the exact tail for palette index %d",
+             (int)stroke.color);
+
+    rm_buf_free(&tail);
+    rm_bytes_free(bytes);
+  }
+}
+
+static void a4_writer_columns_authors_limits_and_palette_contracts(void) {
+  /* 1) Column width +0.0f / -0.0f vs invalid width and setting (R7-2, R82,
+   * R105, R109, R114, R122, R130, R132). */
+  const float zero_widths[2] = {0.0f, -0.0f};
+  for (size_t z = 0; z < 2; ++z) {
+    rm_page_draft d = {.author = {1},
+                       .sheet = {1404, 1872, 1404, 1872},
+                       .column = {.width = zero_widths[z], .setting = 1}};
+    uint8_t* bytes = nullptr;
+    size_t size = 0;
+    RM_CHECK(rm_write_page(&d, &bytes, &size, nullptr) == RM_OK,
+             "zero column width signbit=%zu succeeds", z);
+    rm_edit_session* s = nullptr;
+    RM_CHECK(rm_edit_open(bytes, size, &s, nullptr) == RM_OK &&
+                 rm_edit_replace_text(s, 0, 0, "Hi", (rm_item_id){1, 50},
+                                      nullptr) == RM_OK,
+             "edit text after zero-width draft");
+    rm_page* p = nullptr;
+    size_t sz = 0;
+    const uint8_t* ebytes = rm_edit_bytes(s, &sz);
+    RM_CHECK(rm_parse_page(ebytes, sz, &p, nullptr) == RM_OK && p != nullptr &&
+                 p->has_text && p->text.column_width == 936.0 &&
+                 p->text.origin_x == -468.0,
+             "zero width resolves identically to 936/-468");
+    rm_page_free(p);
+    rm_edit_close(s);
+    rm_bytes_free(bytes);
+  }
+
+  const float bad_widths[3] = {-1.0f, NAN, -INFINITY};
+  for (size_t i = 0; i < 3; ++i) {
+    rm_page_draft d = {.author = {1},
+                       .sheet = {1404, 1872, 1404, 1872},
+                       .column = {.width = bad_widths[i], .setting = 1}};
+    uint8_t* sentinel_out = (uint8_t*)0x1;
+    size_t sentinel_sz = 777;
+    RM_CHECK(rm_write_page(&d, &sentinel_out, &sentinel_sz, nullptr) ==
+                     RM_ERR_INVALID_ARGUMENT &&
+                 sentinel_out == (uint8_t*)0x1 && sentinel_sz == 777,
+             "invalid column.width[%zu] refuses with untouched outs", i);
+  }
+
+  const uint8_t bad_settings[2] = {3, 128};
+  for (size_t i = 0; i < 2; ++i) {
+    rm_page_draft d = {.author = {1},
+                       .sheet = {1404, 1872, 1404, 1872},
+                       .column = {.width = 0.0f, .setting = bad_settings[i]}};
+    uint8_t* sentinel_out = (uint8_t*)0x1;
+    size_t sentinel_sz = 888;
+    rm_error err = {0};
+    RM_CHECK(rm_write_page(&d, &sentinel_out, &sentinel_sz, &err) ==
+                     RM_ERR_INVALID_ARGUMENT &&
+                 strcmp(err.message, "column.setting") == 0 &&
+                 sentinel_out == (uint8_t*)0x1 && sentinel_sz == 888,
+             "unsupported column.setting=%u refuses with untouched outs",
+             bad_settings[i]);
+  }
+
+  const struct {
+    uint8_t setting;
+    uint32_t sw, sh;
+    double width, origin_x;
+  } setting_cases[] = {
+      {0, 1404, 1872, 740.0, -370.0},  {1, 1404, 1872, 936.0, -468.0},
+      {2, 1404, 1872, 1152.0, -576.0}, {4, 1600, 2000, 1152.0, -576.0},
+      {4, 1600, 0, 936.0, -468.0},
+  };
+  for (size_t i = 0; i < sizeof setting_cases / sizeof *setting_cases; ++i) {
+    rm_draft_paragraph para = {.text = "X"};
+    rm_page_draft d = {
+        .author = {1},
+        .sheet = {setting_cases[i].sw, setting_cases[i].sh, 0, 0},
+        .column = {.width = 0.0f, .setting = setting_cases[i].setting},
+        .paragraphs = &para,
+        .paragraph_count = 1};
+    uint8_t* wbytes = nullptr;
+    size_t wsz = 0;
+    RM_CHECK(rm_write_page(&d, &wbytes, &wsz, nullptr) == RM_OK,
+             "write column case %zu", i);
+    rm_page* wp = nullptr;
+    RM_CHECK(rm_parse_page(wbytes, wsz, &wp, nullptr) == RM_OK &&
+                 wp != nullptr &&
+                 wp->text.column_width == setting_cases[i].width &&
+                 wp->text.origin_x == setting_cases[i].origin_x,
+             "writer column case %zu -> width=%g origin=%g", i,
+             setting_cases[i].width, setting_cases[i].origin_x);
+    rm_page_free(wp);
+    rm_bytes_free(wbytes);
+
+    /* Now empty text draft opened in editor and edited at 0 -> same resolved
+     * width and origin_x. */
+    d.paragraphs = nullptr;
+    d.paragraph_count = 0;
+    RM_CHECK(rm_write_page(&d, &wbytes, &wsz, nullptr) == RM_OK,
+             "write empty column case %zu", i);
+    rm_edit_session* s = nullptr;
+    RM_CHECK(rm_edit_open(wbytes, wsz, &s, nullptr) == RM_OK &&
+                 rm_edit_replace_text(s, 0, 0, "X", (rm_item_id){1, 50},
+                                      nullptr) == RM_OK,
+             "editor text case %zu", i);
+    size_t esz = 0;
+    const uint8_t* eb = rm_edit_bytes(s, &esz);
+    rm_page* ep = nullptr;
+    RM_CHECK(rm_parse_page(eb, esz, &ep, nullptr) == RM_OK && ep != nullptr &&
+                 ep->text.column_width == setting_cases[i].width &&
+                 ep->text.origin_x == setting_cases[i].origin_x,
+             "editor column case %zu matches writer", i);
+    rm_page_free(ep);
+    rm_edit_close(s);
+    rm_bytes_free(wbytes);
+  }
+
+  /* Explicit width=740 with setting=4 writes tag 4=1152, tag 5=740, tag
+   * 3.x=-370 (R114). */
+  {
+    rm_draft_paragraph para = {.text = "Auto"};
+    rm_page_draft d = {.author = {1},
+                       .sheet = {1600, 2000, 1600, 2000},
+                       .column = {.width = 740.0f, .setting = 4},
+                       .paragraphs = &para,
+                       .paragraph_count = 1};
+    uint8_t* bytes = nullptr;
+    size_t size = 0;
+    RM_CHECK(rm_write_page(&d, &bytes, &size, nullptr) == RM_OK,
+             "write Auto with explicit width");
+    rm_reader body;
+    bool checked_rt = false;
+    if (find_block_payload(bytes, size, RM_BLOCK_ROOT_TEXT, &body)) {
+      rm_crdt_id rid;
+      rm_reader items, pos, settings, sw;
+      double ox = 0.0, oy = 0.0;
+      float t4 = 0.0f, t5 = 0.0f;
+      rm_crdt_id stamp;
+      if (rm_read_crdt(&body, 1, &rid) == RM_OK &&
+          rm_expect_tag(&body, 2, RM_TAG_LENGTH4) == RM_OK &&
+          rm_read_subblock(&body, &items) == RM_OK &&
+          rm_expect_tag(&body, 3, RM_TAG_LENGTH4) == RM_OK &&
+          rm_read_subblock(&body, &pos) == RM_OK &&
+          rm_read_f64(&pos, &ox) == RM_OK && rm_read_f64(&pos, &oy) == RM_OK &&
+          rm_expect_tag(&body, 4, RM_TAG_BYTE4) == RM_OK &&
+          rm_read_f32(&body, &t4) == RM_OK &&
+          rm_expect_tag(&body, 5, RM_TAG_LENGTH4) == RM_OK &&
+          rm_read_subblock(&body, &settings) == RM_OK &&
+          rm_expect_tag(&settings, 1, RM_TAG_LENGTH4) == RM_OK &&
+          rm_read_subblock(&settings, &sw) == RM_OK &&
+          rm_read_crdt(&sw, 1, &stamp) == RM_OK &&
+          rm_expect_tag(&sw, 2, RM_TAG_BYTE4) == RM_OK &&
+          rm_read_f32(&sw, &t5) == RM_OK) {
+        checked_rt = (t4 == 1152.0f && t5 == 740.0f && ox == -370.0);
+      }
+    }
+    RM_CHECK(checked_rt,
+             "Auto explicit width writes tag4=1152 tag5=740 origin=-370");
+    rm_bytes_free(bytes);
+  }
+
+  /* 2) LOOSE_STROKE_LIMIT (100000 accepted, > 20000 accepted) & two-paragraph
+   * char limit (R6-1, R65, R17-1, R143). */
+  {
+    constexpr size_t COUNT = 25000;
+    rm_draft_point pt = rm_draft_point_make(0, 0);
+    rm_draft_stroke base_s =
+        rm_draft_stroke_make(RM_TOOL_FINELINER_2, RM_COLOR_BLACK, &pt, 1);
+    rm_draft_stroke* many = calloc(COUNT, sizeof *many);
+    for (size_t i = 0; i < COUNT; ++i) many[i] = base_s;
+    rm_page_draft d = {.author = {1},
+                       .sheet = {1404, 1872, 1404, 1872},
+                       .column = {936, 1},
+                       .strokes = many,
+                       .stroke_count = COUNT};
+    uint8_t* bytes = nullptr;
+    size_t size = 0;
+    RM_CHECK(rm_write_page(&d, &bytes, &size, nullptr) == RM_OK,
+             "25000 strokes accepted");
+    rm_bytes_free(bytes);
+    free(many);
+
+    constexpr size_t CHARS = 99977;
+    char* big = malloc(CHARS + 2u);
+    memset(big, 'a', CHARS);
+    big[CHARS] = '\0';
+    rm_draft_paragraph two_ok[] = {{.text = big}, {.text = "b"}};
+    rm_page_draft dok = {.author = {1},
+                         .sheet = {1404, 1872, 1404, 1872},
+                         .column = {936, 1},
+                         .paragraphs = two_ok,
+                         .paragraph_count = 2};
+    RM_CHECK(rm_write_page(&dok, &bytes, &size, nullptr) == RM_OK,
+             "[99977 'a', 'b'] == 99980 succeeds");
+    rm_bytes_free(bytes);
+
+    big[CHARS] = 'a';
+    big[CHARS + 1] = '\0';
+    bytes = nullptr;
+    rm_error cerr = {0};
+    RM_CHECK(rm_write_page(&dok, &bytes, &size, &cerr) ==
+                     RM_ERR_TOO_MANY_TO_NUMBER &&
+                 strcmp(cerr.message, "characters") == 0 && cerr.value == 99980,
+             "[99978 'a', 'b'] == 99981 fails at characters limit");
+    free(big);
+
+    constexpr size_t EMPTIES = 55000;
+    rm_draft_paragraph* empties = calloc(EMPTIES, sizeof *empties);
+    for (size_t i = 0; i < EMPTIES; ++i) empties[i].text = "";
+    rm_page_draft demp = {.author = {1},
+                          .sheet = {1404, 1872, 1404, 1872},
+                          .column = {936, 1},
+                          .paragraphs = empties,
+                          .paragraph_count = EMPTIES};
+    RM_CHECK(rm_write_page(&demp, &bytes, &size, nullptr) == RM_OK,
+             "55000 empty paragraphs accepted");
+    rm_bytes_free(bytes);
+    free(empties);
+  }
+
+  /* 3) Combined 12,501 marks + missing points fails with "marks" 12500 (R60,
+   * R66). */
+  {
+    constexpr size_t MLIM = 12500;
+    rm_draft_mark* marks = calloc(MLIM + 1u, sizeof *marks);
+    for (size_t i = 0; i <= MLIM; ++i) {
+      marks[i] = (rm_draft_mark){
+          .anchor = {.kind = RM_ANCHOR_BEFORE_TEXT},
+          .stroke = {.tool = RM_TOOL_FINELINER_2, .point_count = 1}};
+    }
+    rm_page_draft d = {.author = {1},
+                       .sheet = {1404, 1872, 1404, 1872},
+                       .column = {936, 1},
+                       .marks = marks,
+                       .mark_count = MLIM + 1u};
+    uint8_t* bytes = nullptr;
+    size_t sz = 0;
+    rm_error err = {0};
+    RM_CHECK(
+        rm_write_page(&d, &bytes, &sz, &err) == RM_ERR_TOO_MANY_TO_NUMBER &&
+            err.value == 12500 && strcmp(err.message, "marks") == 0,
+        "mark limit takes precedence over null stroke points");
+    free(marks);
+  }
+
+  /* 4) Nil author refused (R127); marks_author rules (R117, R137); fresh
+   * colour-9 strokes and images omit moveId. Only a page with an image
+   * carries the 32-byte zero rectangle in SceneInfo. */
+  {
+    rm_page_draft nil_auth = {.sheet = {1404, 1872, 1404, 1872},
+                              .column = {936, 1}};
+    uint8_t* bytes = nullptr;
+    size_t size = 0;
+    rm_error err = {0};
+    RM_CHECK(rm_write_page(&nil_auth, &bytes, &size, &err) ==
+                     RM_ERR_INVALID_ARGUMENT &&
+                 strcmp(err.message, "author") == 0,
+             "all-zero nil draft->author is refused");
+
+    rm_draft_paragraph bold_p = {.text = "B", .bold = true};
+    rm_page_draft bd = {.author = {1},
+                        .sheet = {1404, 1872, 1404, 1872},
+                        .column = {936, 1},
+                        .paragraphs = &bold_p,
+                        .paragraph_count = 1,
+                        .has_marks_author = true};
+    memcpy(bd.marks_author, bd.author, 16);
+    RM_CHECK(
+        rm_write_page(&bd, &bytes, &size, &err) == RM_ERR_INVALID_ARGUMENT &&
+            strcmp(err.message, "marks_author") == 0,
+        "bold non-empty text with marks_author == author is refused");
+    memset(bd.marks_author, 0, 16);
+    RM_CHECK(
+        rm_write_page(&bd, &bytes, &size, &err) == RM_ERR_INVALID_ARGUMENT &&
+            strcmp(err.message, "marks_author") == 0,
+        "bold non-empty text with nil marks_author is refused");
+
+    /* Author {0..0, 1} produces distinct non-nil derived marks_author. */
+    rm_page_draft d_one = {.sheet = {1404, 1872, 1404, 1872},
+                           .column = {936, 1},
+                           .paragraphs = &bold_p,
+                           .paragraph_count = 1};
+    d_one.author[15] = 1;
+    RM_CHECK(rm_write_page(&d_one, &bytes, &size, nullptr) == RM_OK,
+             "author {0..0,1} derived marks_author succeeds");
+    rm_reader abody;
+    bool distinct_author = false;
+    if (find_block_payload(bytes, size, RM_BLOCK_AUTHOR_IDS, &abody)) {
+      size_t n = 0;
+      if (rm_read_count(&abody, &n) == RM_OK && n == 2) {
+        for (size_t e = 0; e < 2; ++e) {
+          rm_reader entry;
+          uint64_t uuid_len = 0;
+          uint16_t aid = 0;
+          const uint8_t* raw_uuid = nullptr;
+          if (rm_expect_tag(&abody, 0, RM_TAG_LENGTH4) == RM_OK &&
+              rm_read_subblock(&abody, &entry) == RM_OK &&
+              rm_read_varuint(&entry, &uuid_len) == RM_OK && uuid_len == 16 &&
+              rm_read_bytes(&entry, 16, &raw_uuid) == RM_OK &&
+              rm_read_u16(&entry, &aid) == RM_OK && aid == 2) {
+            uint8_t zeros[16] = {0};
+            distinct_author = memcmp(raw_uuid, zeros, 16) != 0 &&
+                              memcmp(raw_uuid, d_one.author, 16) != 0;
+          }
+        }
+      }
+    }
+    RM_CHECK(distinct_author, "derived marks_author for {0..0,1} is non-nil");
+    rm_bytes_free(bytes);
+
+    /* Empty bold paragraph alongside plain text ignores nil marks_author. */
+    rm_draft_paragraph empty_bold[] = {{.text = "", .bold = true},
+                                       {.text = "plain"}};
+    rm_page_draft eb = {.author = {1},
+                        .sheet = {1404, 1872, 1404, 1872},
+                        .column = {936, 1},
+                        .paragraphs = empty_bold,
+                        .paragraph_count = 2,
+                        .has_marks_author = true};
+    RM_CHECK(rm_write_page(&eb, &bytes, &size, nullptr) == RM_OK,
+             "empty bold paragraph ignores nil marks_author");
+    rm_bytes_free(bytes);
+
+    /* Compare the same typed page before and after adding an image. */
+    rm_draft_point pt = rm_draft_point_make(0, 0);
+    rm_draft_stroke hl9 = {.tool = RM_TOOL_HIGHLIGHTER_2,
+                           .color = RM_COLOR_HIGHLIGHT,
+                           .has_argb = true,
+                           .argb = 0x40FFFF00u,
+                           .thickness = 1.0,
+                           .points = &pt,
+                           .point_count = 1};
+    rm_draft_image im = {
+        .key = {1}, .file = "a.png", .width = 10, .height = 10};
+    rm_draft_paragraph tp = {.text = "Text"};
+    rm_page_draft td = {.author = {1},
+                        .sheet = {1404, 1872, 1404, 1872},
+                        .column = {936, 1},
+                        .paragraphs = &tp,
+                        .paragraph_count = 1};
+    for (size_t images = 0; images <= 1; ++images) {
+      td.images = &im;
+      td.image_count = images;
+      RM_CHECK(rm_write_page(&td, &bytes, &size, nullptr) == RM_OK,
+               "write SceneInfo with %zu images", images);
+      rm_reader sinfo;
+      uint32_t seen_tags[16] = {0};
+      size_t ntags = 0;
+      bool tag6_zero = false;
+      if (find_block_payload(bytes, size, RM_BLOCK_SCENE_INFO, &sinfo)) {
+        while (rm_reader_remaining(&sinfo) > 0 && ntags < 16) {
+          uint32_t tag = 0;
+          uint8_t typ = 0;
+          if (rm_read_tag(&sinfo, &tag, &typ) != RM_OK) break;
+          seen_tags[ntags++] = tag;
+          if (tag == 6 && typ == RM_TAG_LENGTH4) {
+            rm_reader ext, rbytes;
+            rm_crdt_id ext_id;
+            const uint8_t* ptr = nullptr;
+            if (rm_read_subblock(&sinfo, &ext) == RM_OK &&
+                rm_read_crdt(&ext, 1, &ext_id) == RM_OK &&
+                rm_expect_tag(&ext, 2, RM_TAG_LENGTH4) == RM_OK &&
+                rm_read_subblock(&ext, &rbytes) == RM_OK &&
+                rm_reader_remaining(&rbytes) == 32 &&
+                rm_read_bytes(&rbytes, 32, &ptr) == RM_OK) {
+              uint8_t z32[32] = {0};
+              tag6_zero = memcmp(ptr, z32, 32) == 0;
+            }
+          } else {
+            if (rmi_skip_tagged_value(&sinfo, typ, nullptr) != RM_OK) break;
+          }
+        }
+      }
+      const uint32_t expected_tags[8] = {1, 2, 3, 5, 6, 7, 8, 9};
+      const uint32_t text_tags[] = {1, 2, 3, 5, 7, 8, 9};
+      if (images == 0) {
+        RM_CHECK(
+            ntags == 7 && memcmp(seen_tags, text_tags, sizeof text_tags) == 0,
+            "text-only SceneInfo omits the extended content rectangle");
+      } else {
+        RM_CHECK(
+            ntags == 8 &&
+                memcmp(seen_tags, expected_tags, sizeof expected_tags) == 0 &&
+                tag6_zero,
+            "image SceneInfo tags in exact order 1,2,3,5,6,7,8,9");
+      }
+      rm_bytes_free(bytes);
+    }
+
+    rm_page_draft sd = {.author = {1},
+                        .sheet = {1404, 1872, 1404, 1872},
+                        .column = {936, 1},
+                        .strokes = &hl9,
+                        .stroke_count = 1,
+                        .images = &im,
+                        .image_count = 1};
+    RM_CHECK(rm_write_page(&sd, &bytes, &size, nullptr) == RM_OK,
+             "write color-9 + image draft");
+    rm_reader lbody, ibody;
+    bool stroke_no_tag7 = false, image_no_tag5 = false;
+    if (find_block_payload(bytes, size, RM_BLOCK_SCENE_LINE_ITEM, &lbody)) {
+      rm_item_preamble pre;
+      rm_reader val;
+      if (rm_parse_item_preamble(&lbody, &pre) == RM_OK &&
+          rm_expect_tag(&lbody, 6, RM_TAG_LENGTH4) == RM_OK &&
+          rm_read_subblock(&lbody, &val) == RM_OK) {
+        bool saw_tag7 = false;
+        uint8_t kind = 0;
+        (void)rm_read_u8(&val, &kind);
+        while (rm_reader_remaining(&val) > 0) {
+          uint32_t t = 0;
+          uint8_t tp2 = 0;
+          if (rm_read_tag(&val, &t, &tp2) != RM_OK) break;
+          if (t == 7) saw_tag7 = true;
+          if (rmi_skip_tagged_value(&val, tp2, nullptr) != RM_OK) break;
+        }
+        stroke_no_tag7 = !saw_tag7;
+      }
+    }
+    if (find_block_payload(bytes, size, RM_BLOCK_IMAGE_ITEM, &ibody)) {
+      rm_item_preamble pre;
+      if (rm_parse_item_preamble(&ibody, &pre) == RM_OK &&
+          rm_expect_tag(&ibody, 6, RM_TAG_LENGTH4) == RM_OK) {
+        rm_reader val;
+        if (rm_read_subblock(&ibody, &val) == RM_OK) {
+          bool saw_tag5 = false;
+          uint8_t kind = 0;
+          (void)rm_read_u8(&val, &kind);
+          while (rm_reader_remaining(&val) > 0) {
+            uint32_t t = 0;
+            uint8_t tp2 = 0;
+            if (rm_read_tag(&val, &t, &tp2) != RM_OK) break;
+            if (t == 5) saw_tag5 = true;
+            if (rmi_skip_tagged_value(&val, tp2, nullptr) != RM_OK) break;
+          }
+          image_no_tag5 = !saw_tag5;
+        }
+      }
+    }
+    RM_CHECK(stroke_no_tag7 && image_no_tag5,
+             "fresh color-9 stroke omits tag 7 and fresh image omits tag 5");
+    rm_bytes_free(bytes);
+  }
+
+  /* 5) Tool-aware palette + ARGB + thickness matrix (R104, R111, R134, R168,
+   * R172). */
+  {
+    rm_draft_point pt = rm_draft_point_make(0, 0);
+    rm_draft_stroke hl_def =
+        rm_draft_stroke_make(RM_TOOL_HIGHLIGHTER_2, RM_COLOR_YELLOW, &pt, 1);
+    RM_CHECK(hl_def.thickness == 1.0,
+             "rm_draft_stroke_make highlighter defaults to thickness 1.0");
+    const struct {
+      rm_pen_tool tool;
+      rm_pen_color color;
+      bool has_argb;
+      double thickness;
+      rm_status expect;
+    } cases[] = {
+        {RM_TOOL_HIGHLIGHTER_2, RM_COLOR_HIGHLIGHTER_BLUE, false, 1.0, RM_OK},
+        {RM_TOOL_HIGHLIGHTER_2, RM_COLOR_HIGHLIGHTER_BLUE, true, 1.0,
+         RM_ERR_INVALID_ARGUMENT},
+        {RM_TOOL_HIGHLIGHTER_2, RM_COLOR_HIGHLIGHT, true, 1.0, RM_OK},
+        {RM_TOOL_HIGHLIGHTER_2, RM_COLOR_HIGHLIGHT, false, 1.0,
+         RM_ERR_INVALID_ARGUMENT},
+        {RM_TOOL_HIGHLIGHTER_2, RM_COLOR_YELLOW, false, 2.0,
+         RM_ERR_INVALID_ARGUMENT},
+        {RM_TOOL_HIGHLIGHTER_2, RM_COLOR_YELLOW, false, 3.0,
+         RM_ERR_INVALID_ARGUMENT},
+        {RM_TOOL_SHADER, RM_COLOR_BLACK, false, 2.0, RM_ERR_INVALID_ARGUMENT},
+        {RM_TOOL_SHADER, RM_COLOR_HIGHLIGHT, true, 2.0, RM_OK},
+        {RM_TOOL_FINELINER_2, RM_COLOR_HIGHLIGHT, true, 2.0,
+         RM_ERR_INVALID_ARGUMENT},
+        {RM_TOOL_FINELINER_2, RM_COLOR_HIGHLIGHTER_BLUE, false, 2.0,
+         RM_ERR_INVALID_ARGUMENT},
+        {RM_TOOL_FINELINER_2, RM_COLOR_BLACK, false, 1.5,
+         RM_ERR_INVALID_ARGUMENT},
+        {RM_TOOL_FINELINER_2, RM_COLOR_BLACK, false, 0.0,
+         RM_ERR_INVALID_ARGUMENT},
+        {RM_TOOL_FINELINER_2, RM_COLOR_BLACK, false, -1.0,
+         RM_ERR_INVALID_ARGUMENT},
+        {RM_TOOL_FINELINER_2, RM_COLOR_BLACK, false, 1.0, RM_OK},
+        {RM_TOOL_FINELINER_2, RM_COLOR_BLACK, false, 3.0, RM_OK},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; ++i) {
+      rm_draft_stroke st = {.tool = cases[i].tool,
+                            .color = cases[i].color,
+                            .has_argb = cases[i].has_argb,
+                            .argb = cases[i].has_argb ? 0x80112233u : 0u,
+                            .thickness = cases[i].thickness,
+                            .points = &pt,
+                            .point_count = 1};
+      for (int anchored = 0; anchored < 2; ++anchored) {
+        rm_draft_mark mk = {.anchor = {.kind = RM_ANCHOR_BEFORE_TEXT},
+                            .stroke = st};
+        rm_page_draft d = {.author = {1},
+                           .sheet = {1404, 1872, 1404, 1872},
+                           .column = {936, 1}};
+        if (anchored) {
+          d.marks = &mk;
+          d.mark_count = 1;
+        } else {
+          d.strokes = &st;
+          d.stroke_count = 1;
+        }
+        uint8_t* bytes = nullptr;
+        size_t sz = 0;
+        RM_CHECK(rm_write_page(&d, &bytes, &sz, nullptr) == cases[i].expect,
+                 "palette/thickness case %zu anchored=%d", i, anchored);
+        rm_bytes_free(bytes);
+      }
+    }
+  }
+
+  /* 6) Sheet dimensions, equivalent repaired UTF-8 image keys, far-corner
+   * double overflow, image pen_origin (R52, R234, R238). */
+  {
+    const struct {
+      double cw, ch;
+    } negs[2] = {{-1.0, 1872.0}, {1404.0, -1.0}};
+    for (int i = 0; i < 2; ++i) {
+      rm_page_draft d = {.author = {1},
+                         .sheet = {1404, 1872, negs[i].cw, negs[i].ch},
+                         .column = {936, 1}};
+      uint8_t* out_s = (uint8_t*)0x1;
+      size_t sz_s = 55;
+      rm_error err = {0};
+      RM_CHECK(
+          rm_write_page(&d, &out_s, &sz_s, &err) == RM_ERR_INVALID_ARGUMENT &&
+              strcmp(err.message, "sheet") == 0 && out_s == (uint8_t*)0x1 &&
+              sz_s == 55,
+          "negative sheet canvas %d refused cleanly", i);
+    }
+
+    const struct {
+      double cw, ch;
+    } zeros[3] = {{0.0, 1872.0}, {1404.0, 0.0}, {0.0, 0.0}};
+    for (int i = 0; i < 3; ++i) {
+      rm_page_draft d = {.author = {1},
+                         .sheet = {1404, 1872, zeros[i].cw, zeros[i].ch},
+                         .column = {936, 1}};
+      uint8_t* bytes = nullptr;
+      size_t sz = 0;
+      RM_CHECK(rm_write_page(&d, &bytes, &sz, nullptr) == RM_OK,
+               "zero canvas[%d] writes", i);
+      rm_page* p = nullptr;
+      RM_CHECK(rm_parse_page(bytes, sz, &p, nullptr) == RM_OK && p != nullptr &&
+                   p->has_paper_size && p->paper_size.width == 1404.0 &&
+                   p->paper_size.height == 1872.0,
+               "zero canvas[%d] falls back to (1404, 1872)", i);
+      rm_page_free(p);
+      rm_bytes_free(bytes);
+    }
+
+    rm_page_draft dm = {.author = {1},
+                        .sheet = {1600, 0, 0.0, 1872.0},
+                        .column = {.width = 0.0f, .setting = 4}};
+    uint8_t* mbytes = nullptr;
+    size_t msz = 0;
+    RM_CHECK(rm_write_page(&dm, &mbytes, &msz, nullptr) == RM_OK,
+             "mixed zero screen/canvas writes");
+    rm_page* mp = nullptr;
+    RM_CHECK(rm_parse_page(mbytes, msz, &mp, nullptr) == RM_OK &&
+                 mp != nullptr && !mp->has_paper_size,
+             "mixed zero canvas+screen yields has_paper_size == false");
+    rm_page_free(mp);
+    rm_edit_session* ms = nullptr;
+    RM_CHECK(rm_edit_open(mbytes, msz, &ms, nullptr) == RM_OK &&
+                 rm_edit_replace_text(ms, 0, 0, "A", (rm_item_id){1, 50},
+                                      nullptr) == RM_OK,
+             "Auto editor edit with screen_height == 0");
+    size_t emsz = 0;
+    const uint8_t* embytes = rm_edit_bytes(ms, &emsz);
+    mp = nullptr;
+    RM_CHECK(rm_parse_page(embytes, emsz, &mp, nullptr) == RM_OK &&
+                 mp != nullptr && mp->has_text &&
+                 mp->text.column_width == 936.0 && mp->text.origin_x == -468.0,
+             "Auto with screen_height == 0 resolves Medium 936/-468");
+    rm_page_free(mp);
+    rm_edit_close(ms);
+    rm_bytes_free(mbytes);
+
+    /* Equivalent repaired UTF-8 duplicate image keys succeed (R52). */
+    rm_draft_image eq_imgs[2] = {
+        {.key = {2}, .file = "a\x80.png", .width = 10, .height = 10},
+        {.key = {2}, .file = "a\xEF\xBF\xBD.png", .width = 10, .height = 10},
+    };
+    rm_page_draft deq = {.author = {1},
+                         .sheet = {1404, 1872, 1404, 1872},
+                         .column = {936, 1},
+                         .images = eq_imgs,
+                         .image_count = 2};
+    RM_CHECK(rm_write_page(&deq, &mbytes, &msz, nullptr) == RM_OK,
+             "equivalent repaired UTF-8 image filenames succeed");
+    rm_bytes_free(mbytes);
+
+    rm_draft_image overflow_img = {.key = {3},
+                                   .file = "huge.png",
+                                   .x = FLT_MAX,
+                                   .width = FLT_MAX,
+                                   .height = 10};
+    rm_page_draft dov = {.author = {1},
+                         .sheet = {1404, 1872, 1404, 1872},
+                         .column = {936, 1},
+                         .images = &overflow_img,
+                         .image_count = 1};
+    RM_CHECK(
+        rm_write_page(&dov, &mbytes, &msz, nullptr) == RM_ERR_INVALID_ARGUMENT,
+        "FLT_MAX + FLT_MAX image far-corner overflow fails");
+
+    rm_draft_image unanchored_nan = {.key = {4},
+                                     .file = "ok.png",
+                                     .width = 10,
+                                     .height = 10,
+                                     .has_anchor = false,
+                                     .pen_origin = NAN};
+    dov.images = &unanchored_nan;
+    RM_CHECK(rm_write_page(&dov, &mbytes, &msz, nullptr) == RM_OK,
+             "unanchored image ignores NAN pen_origin");
+    rm_bytes_free(mbytes);
+    unanchored_nan.has_anchor = true;
+    RM_CHECK(
+        rm_write_page(&dov, &mbytes, &msz, nullptr) == RM_ERR_INVALID_ARGUMENT,
+        "anchored image rejects NAN pen_origin");
+  }
+
+  /* 7) Lowered block-limit and wire_fits boundary checks (R67, R71, R108,
+   * R116, R120, R128). */
+  {
+    char big_text[450];
+    memset(big_text, 'x', sizeof big_text - 1u);
+    big_text[sizeof big_text - 1u] = '\0';
+    rm_draft_paragraph p_short = {.text = "ok"};
+    rm_draft_paragraph p_long = {.text = big_text};
+    rm_page_draft dshort = {.author = {1},
+                            .sheet = {1404, 1872, 1404, 1872},
+                            .column = {936, 1},
+                            .paragraphs = &p_short,
+                            .paragraph_count = 1};
+    uint8_t* bytes = nullptr;
+    size_t sz = 0;
+    rm_test_block_limit(512);
+    RM_CHECK(rm_write_page(&dshort, &bytes, &sz, nullptr) == RM_OK,
+             "short text draft fits within 512-byte limit");
+    rm_bytes_free(bytes);
+    dshort.paragraphs = &p_long;
+    RM_CHECK(rm_write_page(&dshort, &bytes, &sz, nullptr) ==
+                 RM_ERR_TOO_MANY_TO_NUMBER,
+             "nested text_block crossing 512 limit returns TOO_MANY_TO_NUMBER");
+
+    RM_CHECK(rmi_error_size(UINT32_MAX) ==
+                 (UINT32_MAX > LONG_MAX ? LONG_MAX : (long)UINT32_MAX),
+             "the full wire limit fits the diagnostic on this platform");
+    RM_CHECK(rmi_error_size(SIZE_MAX) ==
+                 (SIZE_MAX > LONG_MAX ? LONG_MAX : (long)SIZE_MAX),
+             "a size beyond LONG_MAX saturates before conversion");
+    rm_test_block_limit(256);
+    rm_error block_error = {0};
+    RM_CHECK(rm_write_page(&dshort, &bytes, &sz, &block_error) ==
+                     RM_ERR_TOO_MANY_TO_NUMBER &&
+                 block_error.value == 256,
+             "an oversized nested text block reports its wire limit");
+
+    /* SceneInfo-alone limit check (RV46-11). */
+    rm_page_draft empty = {
+        .author = {1}, .sheet = {1404, 1872, 1404, 1872}, .column = {936, 1}};
+    rm_test_block_limit(UINT32_MAX);
+    RM_CHECK(rm_write_page(&empty, &bytes, &sz, nullptr) == RM_OK,
+             "empty draft serializes under full limit");
+    size_t scene_info_len = 0, max_other_len = 0;
+    rm_reader sr = {.data = bytes, .size = sz, .offset = RM_HEADER_LENGTH};
+    rm_block_header sb;
+    while (rm_reader_remaining(&sr) >= 8 &&
+           rm_read_block_header(&sr, &sb) == RM_OK) {
+      size_t body_len = sb.end - sb.body;
+      if (sb.type == RM_BLOCK_SCENE_INFO)
+        scene_info_len = body_len;
+      else if (body_len > max_other_len)
+        max_other_len = body_len;
+      sr.offset = sb.end;
+    }
+    rm_bytes_free(bytes);
+    RM_CHECK(scene_info_len > max_other_len,
+             "SceneInfo body (%zu) strictly exceeds all other empty blocks "
+             "(max %zu)",
+             scene_info_len, max_other_len);
+    rm_test_block_limit(scene_info_len);
+    RM_CHECK(rm_write_page(&empty, &bytes, &sz, nullptr) == RM_OK,
+             "SceneInfo succeeds at exact body length %zu", scene_info_len);
+    rm_bytes_free(bytes);
+    rm_test_block_limit(scene_info_len - 1u);
+    RM_CHECK(rm_write_page(&empty, &bytes, &sz, nullptr) ==
+                 RM_ERR_TOO_MANY_TO_NUMBER,
+             "SceneInfo exceeding lowered block limit returns TOO_MANY");
+    rm_test_block_limit(UINT32_MAX);
+
+    /* Direct wire_fits + >50-point color-9 NAN precedence at L and L - 1. */
+    rm_draft_point pts[60];
+    for (size_t i = 0; i < 60; ++i) pts[i] = rm_draft_point_make((float)i, 0);
+    rm_draft_stroke hl9 = {.tool = RM_TOOL_HIGHLIGHTER_2,
+                           .color = RM_COLOR_HIGHLIGHT,
+                           .has_argb = true,
+                           .argb = 0x55AA00AAu,
+                           .thickness = 1.0,
+                           .points = pts,
+                           .point_count = 60};
+    rm_buf lb = {0};
+    rm_wid parent = rm_crdt_make(1, 11), sid = rm_crdt_make(1, 200000),
+           none = RM_CRDT_NONE;
+    rm_write_line_item(&lb, &hl9, parent, sid, none, none);
+    size_t L = lb.count;
+    rm_buf_free(&lb);
+
+    rm_test_block_limit(L);
+    RM_CHECK(rmi_line_item_wire_fits(&hl9, parent, sid, none, none),
+             "rmi_line_item_wire_fits accepts exact body length L=%zu", L);
+    rm_test_block_limit(L - 1u);
+    RM_CHECK(!rmi_line_item_wire_fits(&hl9, parent, sid, none, none),
+             "rmi_line_item_wire_fits rejects L - 1");
+
+    rm_page_draft wd = {.author = {1},
+                        .sheet = {1404, 1872, 1404, 1872},
+                        .column = {936, 1},
+                        .strokes = &hl9,
+                        .stroke_count = 1};
+    RM_CHECK(
+        rm_write_page(&wd, &bytes, &sz, nullptr) == RM_ERR_TOO_MANY_TO_NUMBER,
+        "valid 60-point color-9 stroke exceeds L - 1");
+    pts[0].x = NAN;
+    RM_CHECK(
+        rm_write_page(&wd, &bytes, &sz, nullptr) == RM_ERR_TOO_MANY_TO_NUMBER,
+        "wire limit precedes NaN coordinate validation at L - 1");
+    pts[0].x = 0.0f;
+    rm_test_block_limit(L);
+    RM_CHECK(rm_write_page(&wd, &bytes, &sz, nullptr) == RM_OK,
+             "60-point color-9 stroke succeeds at exact block limit L=%zu", L);
+    rm_bytes_free(bytes);
+    rm_test_block_limit(UINT32_MAX);
+
+    /* RV43-R2-12: out-of-range anchor is refused in Step 5 before Step 6
+     * text_block limit. */
+    rm_draft_mark bad_mark = {
+        .anchor = {.kind = RM_ANCHOR_FIRST_CHARACTER, .paragraph = 5},
+        .pen_origin = -468.0f,
+        .stroke =
+            rm_draft_stroke_make(RM_TOOL_FINELINER_2, RM_COLOR_BLACK, pts, 1)};
+    rm_page_draft d_bad_anchor = {.author = {1},
+                                  .sheet = {1404, 1872, 1404, 1872},
+                                  .column = {936, 1},
+                                  .paragraphs = &p_long,
+                                  .paragraph_count = 1,
+                                  .marks = &bad_mark,
+                                  .mark_count = 1};
+    rm_test_block_limit(512);
+    rm_error aerr = {0};
+    RM_CHECK(rm_write_page(&d_bad_anchor, &bytes, &sz, &aerr) ==
+                     RM_ERR_ANCHOR_OUT_OF_RANGE &&
+                 aerr.status == RM_ERR_ANCHOR_OUT_OF_RANGE,
+             "out-of-range mark anchor precedes oversized text_block limit "
+             "(RV43-R2-12)");
+    rm_test_block_limit(UINT32_MAX);
+  }
+}
+
+static void template_repairs_ill_formed_utf8(void) {
+  rm_page_draft draft = {.author = {1},
+                         .sheet = {1404, 1872, 1404, 1872},
+                         .column = rm_draft_column_of(RM_COLUMN_MEDIUM)};
+  uint8_t* data = nullptr;
+  size_t size = 0;
+  RM_CHECK(rm_write_page(&draft, &data, &size, nullptr) == RM_OK, "write");
+  rm_page* page = nullptr;
+  RM_CHECK(rm_parse_page(data, size, &page, nullptr) == RM_OK, "parse");
+  rm_bytes_free(data);
+  RM_CHECK(rm_page_set_template(page, "bad\x80tmpl") == RM_OK,
+           "set_template succeeds with ill-formed UTF-8");
+  RM_CHECK_EQ_STR(page->template_name.bytes, page->template_name.length,
+                  "bad\xEF\xBF\xBDtmpl",
+                  "set_template repairs ill-formed UTF-8");
+  rm_page_free(page);
+}
+
+static void anchored_mark_on_empty_last_paragraph_survives_round_trip(void) {
+  rm_draft_paragraph paras[] = {{.text = "Hello"}, {.text = ""}};
+  rm_draft_point pt = rm_draft_point_make(0, 0);
+  rm_draft_mark mark = {
+      .anchor = {.kind = RM_ANCHOR_FIRST_CHARACTER, .paragraph = 1},
+      .pen_origin = -468.0f,
+      .stroke =
+          rm_draft_stroke_make(RM_TOOL_FINELINER_2, RM_COLOR_BLACK, &pt, 1)};
+  rm_page_draft draft = {.sheet = {1404, 1872, 1404, 1872},
+                         .column = rm_draft_column_of(RM_COLUMN_MEDIUM),
+                         .paragraphs = paras,
+                         .paragraph_count = 2,
+                         .marks = &mark,
+                         .mark_count = 1};
+  memcpy(draft.author, AUTHOR, 16);
+  rm_page* page = round_trip(&draft);
+  RM_CHECK(page != nullptr && page->stroke_count == 1, "mark round-trips");
+  if (page && page->stroke_count == 1) {
+    RM_CHECK(page->strokes[0].has_anchor &&
+                 page->strokes[0].anchor.paragraph == 1 &&
+                 page->strokes[0].anchor.offset == 0,
+             "anchor on empty last paragraph resolves to paragraph 1 offset 0 "
+             "(has=%d para=%d off=%d)",
+             page->strokes[0].has_anchor, page->strokes[0].anchor.paragraph,
+             page->strokes[0].anchor.offset);
+  }
+  rm_page_free(page);
+}
+
 int main(void) {
   missing_point_arrays_are_refused();
   a_written_page_round_trips();
@@ -914,5 +1931,10 @@ int main(void) {
   the_writer_is_deterministic();
   an_explicit_marks_author_is_used();
   a_template_can_be_stamped_on_a_parsed_page();
+  invalid_writer_inputs_are_refused();
+  template_repairs_ill_formed_utf8();
+  anchored_mark_on_empty_last_paragraph_survives_round_trip();
+  fresh_stroke_tail_matches_its_colour();
+  a4_writer_columns_authors_limits_and_palette_contracts();
   return rm_test_report("writer");
 }

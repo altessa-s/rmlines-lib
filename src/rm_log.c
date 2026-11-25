@@ -7,63 +7,36 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "rm_internal.h"
+#include "rm_log_internal.h"
 
-/* The sink and its context move as one: read separately, a line could reach a
- * new sink with the old sink's context. The pair is published behind a single
- * atomic pointer, and a replacement allocates a new pair rather than editing
- * the live one. */
+/* The sink and its context move together. A writer copies the pair under the
+ * guard, then releases it before calling the sink so callbacks can change the
+ * registration. */
 typedef struct rm_log_binding {
   rm_log_sink sink;
   void* context;
 } rm_log_binding;
 
-static _Atomic(rm_log_binding*) rm_log_installed = nullptr;
+static atomic_flag rm_log_guard = ATOMIC_FLAG_INIT;
+static _Atomic bool rm_log_has_sink = false;
+static rm_log_binding rm_log_active = {nullptr, nullptr};
 
-/* Every binding ever installed, kept so that a line already on its way to one
- * does not read freed memory. `rm_log_install` is documented as a
- * once-at-startup call, so the list is a handful of entries at worst — and a
- * leak of a handful of pointers beats a use-after-free in a library that
- * cannot know what threads its host is running. */
-typedef struct rm_log_retired {
-  struct rm_log_retired* next;
-  rm_log_binding binding;
-} rm_log_retired;
-
-static _Atomic(rm_log_retired*) rm_log_history = nullptr;
-
-void rm_log_install(rm_log_sink sink, void* context) {
-  if (sink == nullptr) {
-    rm_log_silence();
-    return;
+static void rm_log_lock(void) {
+  while (
+      atomic_flag_test_and_set_explicit(&rm_log_guard, memory_order_acquire)) {
   }
-  rm_log_retired* entry = malloc(sizeof *entry);
-  if (entry == nullptr) return;
-  entry->binding = (rm_log_binding){.sink = sink, .context = context};
-  rm_log_retired* head =
-      atomic_load_explicit(&rm_log_history, memory_order_relaxed);
-  do {
-    entry->next = head;
-  } while (!atomic_compare_exchange_weak_explicit(&rm_log_history, &head, entry,
-                                                  memory_order_release,
-                                                  memory_order_relaxed));
-  atomic_store_explicit(&rm_log_installed, &entry->binding,
-                        memory_order_release);
 }
 
-void rm_log_silence(void) {
-  atomic_store_explicit(&rm_log_installed, nullptr, memory_order_release);
-}
-
-bool rm_log_wanted(void) {
-  return atomic_load_explicit(&rm_log_installed, memory_order_acquire) !=
-         nullptr;
+static void rm_log_unlock(void) {
+  atomic_flag_clear_explicit(&rm_log_guard, memory_order_release);
 }
 
 void rm_log_writef(rm_log_level level, const char* format, ...) {
-  rm_log_binding* binding =
-      atomic_load_explicit(&rm_log_installed, memory_order_acquire);
-  if (binding == nullptr) return;
+  if (!atomic_load_explicit(&rm_log_has_sink, memory_order_acquire)) return;
+  rm_log_lock();
+  rm_log_binding binding = rm_log_active;
+  rm_log_unlock();
+  if (binding.sink == nullptr) return;
 
   /* One line, one stack buffer. The messages are counts, block types and
    * raw style numbers — never a page's text — so a line that does not fit
@@ -82,18 +55,47 @@ void rm_log_writef(rm_log_level level, const char* format, ...) {
   }
   if ((size_t)written < sizeof message) {
     va_end(again);
-    binding->sink(level, message, binding->context);
+    binding.sink(level, message, binding.context);
     return;
   }
   char* whole = malloc((size_t)written + 1u);
   if (whole == nullptr) {
     va_end(again);
+
     /* Out of memory: the line cut short beats no line at all. */
-    binding->sink(level, message, binding->context);
+    binding.sink(level, message, binding.context);
     return;
   }
   (void)vsnprintf(whole, (size_t)written + 1u, format, again);
   va_end(again);
-  binding->sink(level, whole, binding->context);
+  binding.sink(level, whole, binding.context);
   free(whole);
+}
+
+/* Registration and silencing must remain allocation-free (R235 / RV43-R2-14).
+ */
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC poison malloc calloc realloc free
+#endif
+
+void rm_log_install(rm_log_sink sink, void* context) {
+  if (sink == nullptr) {
+    rm_log_silence();
+    return;
+  }
+  rm_log_lock();
+  rm_log_active = (rm_log_binding){.sink = sink, .context = context};
+  atomic_store_explicit(&rm_log_has_sink, true, memory_order_release);
+  rm_log_unlock();
+}
+
+void rm_log_silence(void) {
+  rm_log_lock();
+  rm_log_active = (rm_log_binding){nullptr, nullptr};
+  atomic_store_explicit(&rm_log_has_sink, false, memory_order_release);
+  rm_log_unlock();
+}
+
+bool rm_log_wanted(void) {
+  return atomic_load_explicit(&rm_log_has_sink, memory_order_acquire);
 }

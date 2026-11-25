@@ -9,21 +9,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "rm_internal.h"
+#include "rm_edit_ops.h"
+#include "rm_scene.h"
 #include "rmlines/editor.h"
 #include "rmlines/parser.h"
-#include "rmlines/writer.h"
-
-/* Fill in `*out_error`, when the caller asked for one, with the status, the
- * numeric value and an optional message. */
-static void fail_with(rm_error* out_error, rm_status status, long value,
-                      const char* message) {
-  if (out_error == nullptr) return;
-  *out_error = (rm_error){.status = status, .value = value};
-  if (message != nullptr) {
-    snprintf(out_error->message, sizeof out_error->message, "%s", message);
-  }
-}
 
 /* Where a living item's deleted length stands in the page, when the block the
  * reader is at is one of `wanted`; false for any other block. The reader is
@@ -31,18 +20,24 @@ static void fail_with(rm_error* out_error, rm_status status, long value,
  * nowhere else: a tombstone's block ends right behind its preamble, and the
  * next block's length of 108 spells 0x6C, the very tag of a value. */
 static bool living_item(rm_reader* reader, const rm_idmap* wanted,
-                        rm_crdt_id* out_id, size_t* out_deleted_at) {
-  /* A block whose preamble does not read is not one we were asked about:
-   * the parse that ran first counted it, and it goes out as it came in. */
+                        const rm_idmap* removed_parents, rm_crdt_id* out_id,
+                        size_t* out_deleted_at) {
+  /* A block whose preamble does not read is not one we were asked about: the
+   * parse that ran first counted it, and it goes out as it came in. */
   rm_item_preamble preamble;
   if (rm_parse_item_preamble(reader, &preamble) != RM_OK) return false;
+
   /* The preamble ends with the four bytes of the deleted length. */
   size_t deleted_at = reader->offset - 4u;
   if (!rm_idmap_contains(wanted, preamble.id)) return false;
+
   /* Already a tombstone — erased, or a range of erased items — is not a
    * living item, and the request that named it is not about this page as it
    * is. */
   if (preamble.deleted != 0 || !rm_match_tag(reader, 6, RM_TAG_LENGTH4))
+    return false;
+  if (removed_parents != nullptr &&
+      rm_idmap_contains(removed_parents, preamble.parent))
     return false;
   *out_id = preamble.id;
   *out_deleted_at = deleted_at;
@@ -76,14 +71,14 @@ static rm_status verify(const uint8_t* edited, size_t size,
   rm_error parse_error;
   rm_status status = rm_parse_page(edited, size, &page, &parse_error);
   if (status == RM_ERR_OUT_OF_MEMORY) {
-    fail_with(out_error, status, 0, nullptr);
+    rmi_error_set(out_error, status, 0, 0, nullptr);
     return status;
   }
   if (status != RM_OK) {
     char message[160];
     snprintf(message, sizeof message, "the edited page does not parse: %s",
              rm_status_string(status));
-    fail_with(out_error, RM_ERR_UNVERIFIED, 0, message);
+    rmi_error_set(out_error, RM_ERR_UNVERIFIED, 0, 0, message);
     return RM_ERR_UNVERIFIED;
   }
 
@@ -93,7 +88,7 @@ static rm_status verify(const uint8_t* edited, size_t size,
              "the edited page skips %zu blocks, the original %zu",
              page->skipped_blocks, original->skipped_blocks);
     rm_page_free(page);
-    fail_with(out_error, RM_ERR_UNVERIFIED, 0, message);
+    rmi_error_set(out_error, RM_ERR_UNVERIFIED, 0, 0, message);
     return RM_ERR_UNVERIFIED;
   }
 
@@ -104,18 +99,20 @@ static rm_status verify(const uint8_t* edited, size_t size,
   if (!identifiers(original, erased, &before) ||
       !identifiers(page, nullptr, &after)) {
     status = RM_ERR_OUT_OF_MEMORY;
-    fail_with(out_error, status, 0, nullptr);
+    rmi_error_set(out_error, status, 0, 0, nullptr);
   } else {
     bool same = before.count == after.count;
+
     for (size_t i = 0; same && i < before.count; i += 1) {
       same = rm_item_id_equal(*(rm_item_id*)rm_vec_at(&before, i),
                               *(rm_item_id*)rm_vec_at(&after, i));
     }
     if (!same) {
       status = RM_ERR_UNVERIFIED;
-      fail_with(out_error, status, 0,
-                "the edited page does not hold what the original held less the "
-                "erased");
+      rmi_error_set(
+          out_error, status, 0, 0,
+          "the edited page does not hold what the original held less the "
+          "erased");
     }
   }
   rm_vec_free(&before);
@@ -139,10 +136,12 @@ static void fail_not_found(rm_error* out_error, const rm_item_id* ids,
     rm_crdt_id key = rm_crdt_of(ids[i]);
     if (rm_idmap_contains(erased, key) || rm_idmap_contains(&named, key))
       continue;
+
     /* A failed insert only means a name may be said twice. */
     (void)rm_idmap_set(&named, key, 1);
     char spelled[32];
     rm_item_id_format(ids[i], spelled, sizeof spelled);
+
     /* Room kept for the ", ..." that says the list goes on. */
     if (length + strlen(separator) + strlen(spelled) + 6u >= sizeof message) {
       snprintf(message + length, sizeof message - length, ", ...");
@@ -154,17 +153,20 @@ static void fail_not_found(rm_error* out_error, const rm_item_id* ids,
     separator = ", ";
   }
   rm_idmap_free(&named);
-  fail_with(out_error, RM_ERR_ITEMS_NOT_FOUND, (long)missing, message);
+  rmi_error_set(out_error, RM_ERR_ITEMS_NOT_FOUND, 0, (long)missing, message);
 }
 
-rm_status rm_erase_items(const uint8_t* data, size_t size,
-                         const rm_item_id* ids, size_t id_count,
-                         uint8_t** out_bytes, size_t* out_size,
-                         rm_error* out_error) {
+/* Build the edited bytes separately. The caller receives them only after the
+ * remaining visible identifiers have been checked against the original page. */
+static rm_status erase_impl(const uint8_t* data, size_t size,
+                            const rm_item_id* ids, size_t id_count,
+                            uint8_t** out_bytes, size_t* out_size,
+                            bool* out_verified, rm_error* out_error) {
+  if (out_verified) *out_verified = false;
   if (out_error != nullptr) *out_error = (rm_error){.status = RM_OK};
   if (data == nullptr || out_bytes == nullptr || out_size == nullptr ||
       (ids == nullptr && id_count != 0)) {
-    fail_with(out_error, RM_ERR_INVALID_ARGUMENT, 0, nullptr);
+    rmi_error_set(out_error, RM_ERR_INVALID_ARGUMENT, 0, 0, nullptr);
     return RM_ERR_INVALID_ARGUMENT;
   }
 
@@ -172,7 +174,7 @@ rm_status rm_erase_items(const uint8_t* data, size_t size,
   if (id_count == 0) {
     uint8_t* copy = malloc(size == 0 ? 1 : size);
     if (copy == nullptr) {
-      fail_with(out_error, RM_ERR_OUT_OF_MEMORY, 0, nullptr);
+      rmi_error_set(out_error, RM_ERR_OUT_OF_MEMORY, 0, 0, nullptr);
       return RM_ERR_OUT_OF_MEMORY;
     }
     if (size != 0) memcpy(copy, data, size);
@@ -184,7 +186,15 @@ rm_status rm_erase_items(const uint8_t* data, size_t size,
   rm_page* original = nullptr;
   RM_TRY(rm_parse_page(data, size, &original, out_error));
 
-  rm_status status = RM_ERR_OUT_OF_MEMORY;
+  rmi_tree_state live_tree = {0};
+  rm_status status =
+      rmi_scene_live_removed_nodes(data, size, &live_tree, out_error);
+  if (status != RM_OK) {
+    rm_page_free(original);
+    return status;
+  }
+
+  status = RM_ERR_OUT_OF_MEMORY;
   rm_idmap wanted, erased;
   rm_idmap_init(&wanted);
   rm_idmap_init(&erased);
@@ -204,9 +214,10 @@ rm_status rm_erase_items(const uint8_t* data, size_t size,
   reader.offset = RM_HEADER_LENGTH;
   rm_buf_append(&output, data, RM_HEADER_LENGTH);
 
+  size_t limit = rmi_block_limit();
   while (rm_reader_remaining(&reader) >= 8) {
-    /* The parse above accepted every envelope, so this cannot fail on a
-     * page that reached here; it is checked all the same. */
+    /* The parse above accepted every envelope, so this cannot fail on a page
+     * that reached here; it is checked all the same. */
     rm_block_header block;
     status = rm_read_block_header(&reader, &block);
     if (status != RM_OK) goto fail;
@@ -215,12 +226,24 @@ rm_status rm_erase_items(const uint8_t* data, size_t size,
     size_t deleted_at;
     rm_reader inner = reader;
     inner.size = block.end;
+
+    /* The two block types an erase rewrites: a stroke and a highlight over
+     * the text of an imported PDF. */
     if ((block.type == RM_BLOCK_SCENE_LINE_ITEM ||
          block.type == RM_BLOCK_SCENE_GLYPH_ITEM) &&
-        living_item(&inner, &wanted, &id, &deleted_at)) {
+        living_item(&inner, &wanted, &live_tree.removed, &id, &deleted_at)) {
+      if (rm_idmap_contains(&erased, id)) {
+        status = RM_ERR_UNVERIFIED;
+        goto fail;
+      }
       status = RM_ERR_OUT_OF_MEMORY;
       if (!rm_idmap_set(&erased, id, 1)) goto fail;
+
       size_t kept = deleted_at - block.body;
+      if (kept + 4u > limit) {
+        status = RM_ERR_TOO_MANY_TO_NUMBER;
+        goto fail;
+      }
       rm_write_u32(&output, (uint32_t)(kept + 4u));
       const uint8_t header[] = {block.unknown, block.min_version,
                                 block.current_version, block.type};
@@ -232,10 +255,11 @@ rm_status rm_erase_items(const uint8_t* data, size_t size,
     }
     reader.offset = block.end;
   }
+
   /* Fewer bytes than a block header: not a block, and not ours to drop. */
   rm_buf_append(&output, data + reader.offset, rm_reader_remaining(&reader));
-  status = RM_ERR_OUT_OF_MEMORY;
-  if (output.failed) goto fail;
+  status = rmi_buf_status(&output);
+  if (status != RM_OK) goto fail;
 
   if (erased.count < wanted_count) {
     status = RM_ERR_ITEMS_NOT_FOUND;
@@ -255,17 +279,35 @@ rm_status rm_erase_items(const uint8_t* data, size_t size,
   }
   *out_bytes = bytes;
   *out_size = written;
+  if (out_verified) *out_verified = (original->skipped_blocks == 0);
   status = RM_OK;
   goto cleanup;
 
 fail:
-  fail_with(out_error, status, 0, nullptr);
+  rmi_error_set(out_error, status, 0, 0, nullptr);
 cleanup:
   rm_buf_free(&output);
   rm_idmap_free(&erased);
   rm_idmap_free(&wanted);
+  rmi_tree_state_free(&live_tree);
   rm_page_free(original);
   return status;
+}
+
+rm_status rmi_edit_erase_bytes(const uint8_t* data, size_t size,
+                               const rm_item_id* ids, size_t count,
+                               rmi_edit_candidate* out, rm_error* error) {
+  *out = (rmi_edit_candidate){0};
+  return erase_impl(data, size, ids, count, &out->bytes, &out->size,
+                    &out->verified, error);
+}
+
+rm_status rm_erase_items(const uint8_t* data, size_t size,
+                         const rm_item_id* ids, size_t id_count,
+                         uint8_t** out_bytes, size_t* out_size,
+                         rm_error* out_error) {
+  return erase_impl(data, size, ids, id_count, out_bytes, out_size, nullptr,
+                    out_error);
 }
 
 rm_status rm_highlighter_items(const uint8_t* data, size_t size,
@@ -273,7 +315,7 @@ rm_status rm_highlighter_items(const uint8_t* data, size_t size,
                                rm_error* out_error) {
   if (out_error != nullptr) *out_error = (rm_error){.status = RM_OK};
   if (data == nullptr || out_ids == nullptr || out_count == nullptr) {
-    fail_with(out_error, RM_ERR_INVALID_ARGUMENT, 0, nullptr);
+    rmi_error_set(out_error, RM_ERR_INVALID_ARGUMENT, 0, 0, nullptr);
     return RM_ERR_INVALID_ARGUMENT;
   }
   rm_vec ids;

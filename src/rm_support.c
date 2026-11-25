@@ -6,9 +6,9 @@
  * grouping — everything the format's own code is built on and nothing of the
  * format itself. */
 
-#include <stdlib.h>
+#include "rm_support.h"
 
-#include "rm_internal.h"
+#include <stdlib.h>
 
 /* ------------------------------------------------------------------ */
 /* Arena                                                               */
@@ -83,17 +83,31 @@ void* rm_arena_alloc(rm_arena* arena, size_t size) {
   if (!rm_align_up(size, &size)) return nullptr;
 
   rm_arena_chunk* head = arena->head;
-  if (head == nullptr || head->capacity - head->used < size) {
-    size_t capacity = size > RM_ARENA_CHUNK ? size : RM_ARENA_CHUNK;
-    if (capacity > SIZE_MAX - sizeof(rm_arena_chunk)) return nullptr;
-    rm_arena_chunk* chunk = malloc(sizeof(rm_arena_chunk) + capacity);
-    if (chunk == nullptr) return nullptr;
-    chunk->next = arena->head;
-    chunk->used = 0;
-    chunk->capacity = capacity;
-    arena->head = chunk;
-    head = chunk;
+  if (head != nullptr && head->capacity - head->used >= size) {
+    void* result = head->data + head->used;
+    head->used += size;
+    return result;
   }
+  if (head != nullptr && size > RM_ARENA_CHUNK) {
+    if (size > SIZE_MAX - sizeof(rm_arena_chunk)) return nullptr;
+    rm_arena_chunk* chunk = malloc(sizeof(rm_arena_chunk) + size);
+    if (chunk == nullptr) return nullptr;
+    chunk->next = head->next;
+    chunk->used = size;
+    chunk->capacity = size;
+    head->next = chunk;
+    return chunk->data;
+  }
+
+  size_t capacity = size > RM_ARENA_CHUNK ? size : RM_ARENA_CHUNK;
+  if (capacity > SIZE_MAX - sizeof(rm_arena_chunk)) return nullptr;
+  rm_arena_chunk* chunk = malloc(sizeof(rm_arena_chunk) + capacity);
+  if (chunk == nullptr) return nullptr;
+  chunk->next = arena->head;
+  chunk->used = 0;
+  chunk->capacity = capacity;
+  arena->head = chunk;
+  head = chunk;
   void* result = head->data + head->used;
   head->used += size;
   return result;
@@ -108,6 +122,8 @@ void* rm_arena_calloc(rm_arena* arena, size_t count, size_t size) {
 }
 
 char* rm_arena_strndup(rm_arena* arena, const char* bytes, size_t length) {
+  if (length > SIZE_MAX - 1u || (length != 0 && bytes == nullptr))
+    return nullptr;
   char* copy = rm_arena_alloc(arena, length + 1u);
   if (copy == nullptr) return nullptr;
   if (length != 0) memcpy(copy, bytes, length);
@@ -131,6 +147,7 @@ void rm_vec_free(rm_vec* vec) {
 }
 
 bool rm_vec_reserve(rm_vec* vec, size_t capacity) {
+  if (vec == nullptr || vec->elem == 0) return false;
   if (capacity <= vec->capacity) return true;
   if (capacity > SIZE_MAX / vec->elem) return false;
   void* grown = realloc(vec->data, capacity * vec->elem);
@@ -141,7 +158,9 @@ bool rm_vec_reserve(rm_vec* vec, size_t capacity) {
 }
 
 bool rm_vec_push(rm_vec* vec, const void* element) {
+  if (vec == nullptr || vec->elem == 0 || element == nullptr) return false;
   if (vec->count == vec->capacity) {
+    if (vec->capacity > SIZE_MAX / 2u) return false;
     size_t next = vec->capacity == 0 ? 8u : vec->capacity * 2u;
     if (!rm_vec_reserve(vec, next)) return false;
   }
@@ -157,27 +176,45 @@ void rm_buf_free(rm_buf* buf) {
   *buf = (rm_buf){0};
 }
 
+/* Keep the first error. A later append cannot make a truncated block writable
+ * again. */
+void rmi_buf_fail(rm_buf* buf, rm_buf_err error) {
+  if (buf == nullptr || error == RM_BUF_OK) return;
+  if (buf->error == RM_BUF_OK) buf->error = error;
+}
+
+void rmi_buf_propagate(rm_buf* dst, const rm_buf* src) {
+  if (src == nullptr || src->error == RM_BUF_OK) return;
+  rmi_buf_fail(dst, src->error);
+}
+
+rm_status rmi_buf_status(const rm_buf* buf) {
+  if (buf == nullptr || buf->error == RM_BUF_OK) return RM_OK;
+  return buf->error == RM_BUF_ERR_TOO_LONG ? RM_ERR_TOO_MANY_TO_NUMBER
+                                           : RM_ERR_OUT_OF_MEMORY;
+}
+
 /* Make room for `extra` more bytes, growing the capacity by doubling. False,
  * and the buffer marked failed, when the growth cannot be satisfied. */
 static bool rm_buf_grow(rm_buf* buf, size_t extra) {
-  if (buf->failed) return false;
+  if (buf->error != RM_BUF_OK) return false;
   if (buf->capacity - buf->count >= extra) return true;
-  size_t needed = buf->count + extra;
-  if (needed < buf->count) {
-    buf->failed = true;
+  if (extra > SIZE_MAX - buf->count) {
+    rmi_buf_fail(buf, RM_BUF_ERR_TOO_LONG);
     return false;
   }
+  size_t needed = buf->count + extra;
   size_t capacity = buf->capacity == 0 ? 256u : buf->capacity;
   while (capacity < needed) {
     if (capacity > SIZE_MAX / 2u) {
-      buf->failed = true;
+      rmi_buf_fail(buf, RM_BUF_ERR_TOO_LONG);
       return false;
     }
     capacity *= 2u;
   }
   uint8_t* grown = realloc(buf->bytes, capacity);
   if (grown == nullptr) {
-    buf->failed = true;
+    rmi_buf_fail(buf, RM_BUF_ERR_OOM);
     return false;
   }
   buf->bytes = grown;
@@ -187,6 +224,10 @@ static bool rm_buf_grow(rm_buf* buf, size_t extra) {
 
 void rm_buf_append(rm_buf* buf, const void* bytes, size_t length) {
   if (length == 0) return;
+  if (bytes == nullptr) {
+    rmi_buf_fail(buf, RM_BUF_ERR_OOM);
+    return;
+  }
   if (!rm_buf_grow(buf, length)) return;
   memcpy(buf->bytes + buf->count, bytes, length);
   buf->count += length;
@@ -197,8 +238,24 @@ void rm_buf_append_byte(rm_buf* buf, uint8_t byte) {
   buf->bytes[buf->count++] = byte;
 }
 
+void rm_buf_shrink(rm_buf* buf, size_t count) {
+  if (buf == nullptr || buf->error != RM_BUF_OK) return;
+  if (count <= buf->count) buf->count = count;
+}
+
+void rm_write_u32_at(rm_buf* buf, size_t offset, uint32_t value) {
+  if (buf == nullptr || buf->error != RM_BUF_OK) return;
+  if (offset > buf->count || buf->count - offset < 4u) {
+    rmi_buf_fail(buf, RM_BUF_ERR_OOM);
+    return;
+  }
+  for (unsigned shift = 0; shift < 32u; shift += 8u) {
+    buf->bytes[offset + (shift >> 3)] = (uint8_t)((value >> shift) & 0xFFu);
+  }
+}
+
 uint8_t* rm_buf_take(rm_buf* buf, size_t* out_size) {
-  if (buf->failed) {
+  if (buf->error != RM_BUF_OK) {
     rm_buf_free(buf);
     if (out_size != nullptr) *out_size = 0;
     return nullptr;
@@ -226,10 +283,10 @@ uint8_t* rm_buf_take(rm_buf* buf, size_t* out_size) {
  *
  * The ranges are Unicode\u2019s own table and not the bit patterns that look
  * like it: 0xC0 and 0xC1 lead only overlong forms of ASCII, and 0xF5 upwards
- * only scalars past U+10FFFF. Read as leads they would make an ill-formed pair
- * decode as one replacement where a conformant decoder gives two \u2014 and the
- * file numbers characters by scalar, so one replacement too few shifts every
- * anchor behind it. */
+ * only scalars past U+10FFFF. Read as leads they would make an ill-formed
+ * pair decode as one replacement where a conformant decoder gives two \u2014
+ * and the file numbers characters by scalar, so one replacement too few
+ * shifts every anchor behind it. */
 static int rm_utf8_lead_length(uint8_t byte) {
   if (byte < 0x80u) return 1;
   if (byte >= 0xC2u && byte <= 0xDFu) return 2;
@@ -257,6 +314,26 @@ static bool rm_utf8_continuation_ok(uint8_t lead, int position, uint8_t byte) {
   return byte >= low && byte <= high;
 }
 
+bool rm_utf8_is_valid(const char* bytes, size_t length) {
+  if (length == 0) return true;
+  if (bytes == nullptr) return false;
+  const uint8_t* in = (const uint8_t*)bytes;
+  for (size_t i = 0; i < length;) {
+    if (in[i] < 0x80u) {
+      i += 1u;
+      continue;
+    }
+    int wanted = rm_utf8_lead_length(in[i]);
+    if (wanted == 0 || (size_t)wanted > length - i) return false;
+    for (int pos = 1; pos < wanted; pos += 1) {
+      if (!rm_utf8_continuation_ok(in[i], pos, in[i + (size_t)pos]))
+        return false;
+    }
+    i += (size_t)wanted;
+  }
+  return true;
+}
+
 size_t rm_utf8_repair(const char* bytes, size_t length, char* out) {
   const uint8_t* in = (const uint8_t*)bytes;
   size_t written = 0;
@@ -265,16 +342,17 @@ size_t rm_utf8_repair(const char* bytes, size_t length, char* out) {
     int wanted = rm_utf8_lead_length(in[i]);
     if (wanted == 0) {
       /* A continuation byte or one of the five-byte leads the format
-       * never had: one replacement, one byte consumed. */
+       * never had: one replacement, one byte consumed (maximal subpart). */
       out[written++] = (char)0xEFu;
       out[written++] = (char)0xBFu;
       out[written++] = (char)0xBDu;
       i += 1;
       continue;
     }
-    /* The maximal subpart: consume as much of the sequence as is
-     * well-formed, replace that whole run with one U+FFFD, and resume at
-     * the first byte that did not belong to it. */
+
+    /* The maximal subpart: consume as much of the sequence as is well-formed,
+     * replace that whole run with one U+FFFD, and resume at the first byte
+     * that did not belong to it. */
     size_t taken = 1;
     bool complete = true;
     while (taken < (size_t)wanted) {
@@ -285,6 +363,7 @@ size_t rm_utf8_repair(const char* bytes, size_t length, char* out) {
       }
       taken += 1;
     }
+
     if (complete) {
       memcpy(out + written, in + i, taken);
       written += taken;
@@ -299,6 +378,21 @@ size_t rm_utf8_repair(const char* bytes, size_t length, char* out) {
   return written;
 }
 
+/* Text a C caller hands over is bytes, and bytes need not be UTF-8. Every
+ * ill-formed run is replaced by U+FFFD before anything is counted, so that
+ * the counters, the page info and the anchors agree with what a reader reads
+ * back. A null string is an empty one. Malloc'd; null when out of memory. */
+char* rmi_utf8_repair_alloc(const char* text) {
+  if (text == nullptr) text = "";
+  size_t length = strlen(text);
+  size_t bound = rm_utf8_repair_bound(length);
+  if (!bound) return nullptr;
+  char* out = malloc(bound);
+  if (out == nullptr) return nullptr;
+  out[rm_utf8_repair(text, length, out)] = '\0';
+  return out;
+}
+
 size_t rm_utf8_scalar_count(const char* bytes, size_t length) {
   const uint8_t* in = (const uint8_t*)bytes;
   size_t count = 0;
@@ -308,15 +402,47 @@ size_t rm_utf8_scalar_count(const char* bytes, size_t length) {
   return count;
 }
 
+/* Count the scalars the repaired text will have without allocating a copy.
+ * The writer reserves character IDs before it builds the text records. */
+size_t rmi_utf8_repaired_scalar_count(const char* bytes, size_t length) {
+  const uint8_t* in = (const uint8_t*)bytes;
+  size_t count = 0;
+  size_t i = 0;
+  while (i < length) {
+    int wanted = rm_utf8_lead_length(in[i]);
+    if (wanted == 0) {
+      count += 1u;
+      i += 1u;
+      continue;
+    }
+    size_t taken = 1u;
+    while (taken < (size_t)wanted) {
+      if (i + taken >= length ||
+          !rm_utf8_continuation_ok(in[i], (int)taken, in[i + taken])) {
+        break;
+      }
+      taken += 1u;
+    }
+    count += 1u;
+    i += taken;
+  }
+  return count;
+}
+
 size_t rm_utf8_next(const char* bytes, size_t length, size_t offset,
                     uint32_t* out_scalar) {
+  if (bytes == nullptr || offset >= length) {
+    if (out_scalar != nullptr) *out_scalar = 0xFFFDu;
+    return length;
+  }
   const uint8_t* in = (const uint8_t*)bytes;
   int wanted = rm_utf8_lead_length(in[offset]);
-  if (wanted == 0 || offset + (size_t)wanted > length) {
+  if (wanted == 0 || (size_t)wanted > length - offset) {
     if (out_scalar != nullptr) *out_scalar = 0xFFFDu;
     return offset + 1u;
   }
   uint32_t scalar;
+
   switch (wanted) {
     case 1:
       scalar = in[offset];
@@ -384,9 +510,10 @@ static rm_idmap_slot* rm_idmap_find(const rm_idmap* map, rm_crdt_id key) {
   }
 }
 
-/* Move every entry into a fresh table of `capacity` slots. False, and the
- * map left as it was, on allocation failure. */
+/* Move every entry into a fresh table of `capacity` slots. False, and the map
+ * left as it was, on allocation failure. */
 static bool rm_idmap_rehash(rm_idmap* map, size_t capacity) {
+  if (capacity > SIZE_MAX / sizeof(rm_idmap_slot)) return false;
   rm_idmap_slot* slots = calloc(capacity, sizeof *slots);
   if (slots == nullptr) return false;
   rm_idmap old = *map;
@@ -404,10 +531,12 @@ static bool rm_idmap_rehash(rm_idmap* map, size_t capacity) {
 }
 
 bool rm_idmap_set(rm_idmap* map, rm_crdt_id key, uint64_t value) {
-  /* Grown at seven eighths rather than at a half: the probe is linear, the
-   * hash is a good one, and a page's maps are built once and read many
-   * times. */
-  if (map->capacity == 0 || (map->count + 1u) * 8u > map->capacity * 7u) {
+  /* Grow before inserting past three quarters full. Consecutive counters are
+   * common on the page, and a long run of occupied slots costs every lookup
+   * through it. */
+  if (map->capacity == 0 ||
+      map->count + 1u > map->capacity - (map->capacity >> 2)) {
+    if (map->capacity > SIZE_MAX / 2u) return false;
     size_t capacity = map->capacity == 0 ? 64u : map->capacity * 2u;
     if (!rm_idmap_rehash(map, capacity)) return false;
   }
@@ -442,6 +571,7 @@ bool rm_idmap_take(rm_idmap* map, rm_crdt_id key, uint64_t* out_value) {
     scan = (scan + 1u) & mask;
     if (!map->slots[scan].used) break;
     size_t home = (size_t)rm_idmap_hash(map->slots[scan].key) & mask;
+
     /* Does `scan` belong at or before the hole, walking forward from its
      * home slot? If so it may move up into the hole. */
     size_t from_home = (scan - home) & mask;
@@ -521,9 +651,10 @@ static rm_keymap_slot* rm_keymap_find(const rm_keymap* map,
   }
 }
 
-/* Move every entry into a fresh table of `capacity` slots. False, and the
- * map left as it was, on allocation failure. */
+/* Move every entry into a fresh table of `capacity` slots. False, and the map
+ * left as it was, on allocation failure. */
 static bool rm_keymap_rehash(rm_keymap* map, size_t capacity) {
+  if (capacity > SIZE_MAX / sizeof(rm_keymap_slot)) return false;
   rm_keymap_slot* slots = calloc(capacity, sizeof *slots);
   if (slots == nullptr) return false;
   rm_keymap old = *map;
@@ -541,7 +672,9 @@ static bool rm_keymap_rehash(rm_keymap* map, size_t capacity) {
 }
 
 bool rm_keymap_set(rm_keymap* map, const uint8_t key[16], uint64_t value) {
-  if (map->capacity == 0 || (map->count + 1u) * 8u > map->capacity * 7u) {
+  if (map->capacity == 0 ||
+      map->count + 1u > map->capacity - (map->capacity >> 2)) {
+    if (map->capacity > SIZE_MAX / 2u) return false;
     size_t capacity = map->capacity == 0 ? 16u : map->capacity * 2u;
     if (!rm_keymap_rehash(map, capacity)) return false;
   }
@@ -583,23 +716,31 @@ bool rm_grouping_build(rm_grouping* grouping, size_t count,
   if (count == 0) return true;
   if (count > UINT32_MAX) return false;
 
-  /* Count the groups and how big each one is, then lay the runs out and
-   * fill them in a second pass. Two passes rather than an array per group:
-   * the item order inside a group has to stay the order they were seen. */
+  /* Count the groups and how big each one is, then lay the runs out and fill
+   * them in a second pass. Two passes rather than an array per group: the
+   * item order inside a group has to stay the order they were seen. */
   uint32_t* counts = calloc(count, sizeof *counts);
-  if (counts == nullptr) return false;
+  uint32_t* group_of = calloc(count, sizeof *group_of);
+  if (counts == nullptr || group_of == nullptr) {
+    free(counts);
+    free(group_of);
+    return false;
+  }
   size_t groups = 0;
   for (size_t i = 0; i < count; i += 1) {
     rm_crdt_id key = key_of(i, ctx);
+
     uint64_t number;
     if (!rm_idmap_get(&grouping->index, key, &number)) {
       number = groups;
       if (!rm_idmap_set(&grouping->index, key, number)) {
         free(counts);
+        free(group_of);
         goto fail;
       }
       groups += 1;
     }
+    group_of[i] = (uint32_t)number;
     counts[number] += 1;
   }
 
@@ -609,6 +750,7 @@ bool rm_grouping_build(rm_grouping* grouping, size_t count,
   if (grouping->starts == nullptr || grouping->ends == nullptr ||
       grouping->items == nullptr) {
     free(counts);
+    free(group_of);
     goto fail;
   }
   uint32_t running = 0;
@@ -620,13 +762,11 @@ bool rm_grouping_build(rm_grouping* grouping, size_t count,
   free(counts);
 
   for (size_t i = 0; i < count; i += 1) {
-    /* Set on the first pass for every key, so the lookup cannot miss;
-     * the initialiser is for gcc, which cannot see that far. */
-    uint64_t number = 0;
-    (void)rm_idmap_get(&grouping->index, key_of(i, ctx), &number);
+    uint32_t number = group_of[i];
     grouping->items[grouping->ends[number]] = (uint32_t)i;
     grouping->ends[number] += 1;
   }
+  free(group_of);
   grouping->group_count = groups;
   grouping->item_count = count;
   return true;
@@ -673,6 +813,7 @@ void rm_text_counts_add(rm_text_counts* counts, const char* text,
     if (scalar == '\n') ++counts->lines;
   }
 }
+
 size_t rm_utf8_repair_bound(size_t length) {
   return length <= (SIZE_MAX - 1) / 3 ? length * 3u + 1u : 0;
 }

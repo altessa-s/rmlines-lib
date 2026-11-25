@@ -20,9 +20,40 @@
 /* Pages built by hand                                                 */
 /* ------------------------------------------------------------------ */
 
+static bool has_bytes(const uint8_t* hay, size_t hlen, const void* needle,
+                      size_t nlen) {
+  if (nlen == 0) return true;
+  if (hlen < nlen) return false;
+  for (size_t i = 0; i + nlen <= hlen; ++i) {
+    if (memcmp(hay + i, needle, nlen) == 0) return true;
+  }
+  return false;
+}
+
 static void start_page(rm_buf* page) {
   rm_buf_init(page);
   rm_buf_append(page, RM_HEADER, RM_HEADER_LENGTH);
+}
+
+static const rm_crdt_id LAYER = {.counter = 11, .author = 1};
+
+static void append_layer(rm_buf* page) {
+  rm_buf state = {0}, group = {0}, value = {0};
+  rm_write_id(&state, 1, LAYER);
+  rm_write_id(&group, 1, rm_crdt_make(0, 1));
+  rm_write_id(&group, 2, rm_crdt_make(1, 12));
+  rm_write_id(&group, 3, RM_CRDT_NONE);
+  rm_write_id(&group, 4, RM_CRDT_NONE);
+  rm_write_tag(&group, 5, RM_TAG_BYTE4);
+  rm_write_u32(&group, 0);
+  rm_buf_append_byte(&value, 2);
+  rm_write_id(&value, 2, LAYER);
+  rm_write_block(&group, 6, value.bytes, value.count);
+  rm_write_top_block(page, 2, 1, 1, state.bytes, state.count);
+  rm_write_top_block(page, 4, 1, 1, group.bytes, group.count);
+  rm_buf_free(&state);
+  rm_buf_free(&group);
+  rm_buf_free(&value);
 }
 
 static rm_page* parse(const uint8_t* bytes, size_t size) {
@@ -194,9 +225,42 @@ static void a_value_that_claims_more_than_its_record_finds_no_marker_past_it(
        .trailing = trailing,
        .trailing_count = sizeof trailing},
   };
-  rm_page* page = text_page(records, 1, 936, NAN);
+  rm_buf buf;
+  start_page(&buf);
+  append_layer(&buf);
+  append_root_text(&buf, records, 1, 936, NAN);
+  rm_page* page = parse(buf.bytes, buf.count);
   expect_lines(page, (const char* const[]){"plain"}, 1, "overclaim");
   rm_page_free(page);
+
+  /* Collision check: overclaim span covers (1, 60)..(1, 64), NOT (1, 65)
+   * (R228). Public append preserves original row bytes and suffix (R149). */
+  rm_edit_session* s = nullptr;
+  RM_CHECK(rm_edit_open(buf.bytes, buf.count, &s, nullptr) == RM_OK, "open");
+  rm_draft_point pt = rm_draft_point_make(0, 0);
+  rm_draft_stroke st =
+      rm_draft_stroke_make(RM_TOOL_FINELINER_2, RM_COLOR_BLACK, &pt, 1);
+  RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 61},
+                                 (rm_item_id){0}, (rm_item_id){0}, &st,
+                                 nullptr) == RM_ERR_INVALID_ARGUMENT,
+           "interior ID (1,61) inside overclaiming row collides");
+  RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 65},
+                                 (rm_item_id){0}, (rm_item_id){0}, &st,
+                                 nullptr) == RM_OK,
+           "ID (1,65) past overclaiming 5-char row succeeds");
+  RM_CHECK(
+      rm_edit_replace_text(s, 5, 0, "!", (rm_item_id){1, 70}, nullptr) == RM_OK,
+      "appending after overclaiming row succeeds");
+  size_t esz = 0;
+  const uint8_t* eb = rm_edit_bytes(s, &esz);
+  rm_page* ep = parse(eb, esz);
+  expect_lines(ep, (const char* const[]){"plain!"}, 1, "overclaim append");
+  RM_CHECK(ep && ep->skipped_blocks == 0, "overclaim append clean");
+  RM_CHECK(has_bytes(eb, esz, "plain", 5),
+           "original overclaiming row bytes preserved verbatim");
+  rm_page_free(ep);
+  rm_edit_close(s);
+  rm_buf_free(&buf);
 }
 
 static void the_stamped_width_of_the_settings_wins_over_the_legacy_one(void) {
@@ -216,18 +280,128 @@ static void the_stamped_width_of_the_settings_wins_over_the_legacy_one(void) {
              "case %zu: the width is %g", i, (double)cases[i].expected);
     rm_page_free(page);
   }
+
+  /* Both wire orders of older 1152.0 + newer 0.0 TAG_TEXT_SETTINGS fall back to
+   * legacy width 936.0 (R59). */
+  for (int newest_first = 0; newest_first < 2; ++newest_first) {
+    rm_buf b, list = {0}, inner = {0}, items = {0}, text = {0}, pos = {0},
+              settings = {0};
+    start_page(&b);
+    rm_buf row = {0}, val = {0};
+    rm_write_id(&row, 2, rm_crdt_make(1, 40));
+    rm_write_id(&row, 3, RM_CRDT_NONE);
+    rm_write_id(&row, 4, RM_CRDT_NONE);
+    rm_write_tag(&row, 5, RM_TAG_BYTE4);
+    rm_write_u32(&row, 0);
+    rm_write_string(&val, "w");
+    rm_write_block(&row, 6, val.bytes, val.count);
+    rm_write_varuint(&list, 1);
+    rm_write_block(&list, 0, row.bytes, row.count);
+    rm_write_block(&inner, 1, list.bytes, list.count);
+    rm_write_block(&items, 1, inner.bytes, inner.count);
+    rm_write_id(&text, 1, RM_CRDT_NONE);
+    rm_write_block(&text, 2, items.bytes, items.count);
+    rm_write_f64(&pos, -468);
+    rm_write_f64(&pos, 234);
+    rm_write_block(&text, 3, pos.bytes, pos.count);
+    rm_write_tag(&text, 4, RM_TAG_BYTE4);
+    rm_write_f32(&text, 936.0f);
+    if (newest_first) {
+      rm_write_stamped_f32(&settings, 1, rm_crdt_make(1, 20), 0.0f);
+      rm_write_stamped_f32(&settings, 1, rm_crdt_make(1, 10), 1152.0f);
+    } else {
+      rm_write_stamped_f32(&settings, 1, rm_crdt_make(1, 10), 1152.0f);
+      rm_write_stamped_f32(&settings, 1, rm_crdt_make(1, 20), 0.0f);
+    }
+    rm_write_block(&text, 5, settings.bytes, settings.count);
+    rm_write_top_block(&b, 0x07, 1, 1, text.bytes, text.count);
+    rm_page* p = parse(b.bytes, b.count);
+    RM_CHECK(p && p->has_text && p->text.has_column_width &&
+                 p->text.column_width == 936.0,
+             "zero newest settings width falls back to 936 (order=%d)",
+             newest_first);
+    rm_page_free(p);
+    rm_buf bufs[] = {b, list, inner, items, text, pos, settings, row, val};
+    for (size_t i = 0; i < sizeof bufs / sizeof *bufs; ++i)
+      rm_buf_free(&bufs[i]);
+  }
+
+  /* Bounded TAG_TEXT_SETTINGS with (a) overflowing tag varuint before valid
+   * tag 1 vs (b) valid skipped unknown field before valid tag 1 (R233). */
+  for (int bad_varuint = 0; bad_varuint < 2; ++bad_varuint) {
+    rm_buf b, list = {0}, inner = {0}, items = {0}, text = {0}, pos = {0},
+              settings = {0}, row = {0}, val = {0};
+    start_page(&b);
+    append_layer(&b);
+    rm_write_id(&row, 2, rm_crdt_make(1, 40));
+    rm_write_id(&row, 3, RM_CRDT_NONE);
+    rm_write_id(&row, 4, RM_CRDT_NONE);
+    rm_write_tag(&row, 5, RM_TAG_BYTE4);
+    rm_write_u32(&row, 0);
+    rm_write_string(&val, "w");
+    rm_write_block(&row, 6, val.bytes, val.count);
+    rm_write_varuint(&list, 1);
+    rm_write_block(&list, 0, row.bytes, row.count);
+    rm_write_block(&inner, 1, list.bytes, list.count);
+    rm_write_block(&items, 1, inner.bytes, inner.count);
+    rm_write_id(&text, 1, RM_CRDT_NONE);
+    rm_write_block(&text, 2, items.bytes, items.count);
+    rm_write_f64(&pos, -468);
+    rm_write_f64(&pos, 234);
+    rm_write_block(&text, 3, pos.bytes, pos.count);
+    rm_write_tag(&text, 4, RM_TAG_BYTE4);
+    rm_write_f32(&text, 936.0f);
+    if (bad_varuint) {
+      const uint8_t over_tag[10] = {0x80, 0x80, 0x80, 0x80, 0x80,
+                                    0x80, 0x80, 0x80, 0x80, 0x80};
+      rm_buf_append(&settings, over_tag, sizeof over_tag);
+    } else {
+      rm_write_tag(&settings, 2, RM_TAG_BYTE4);
+      rm_write_u32(&settings, 99);
+    }
+    rm_write_stamped_f32(&settings, 1, rm_crdt_make(1, 55), 1152.0f);
+    rm_write_block(&text, 5, settings.bytes, settings.count);
+    rm_write_top_block(&b, 0x07, 1, 1, text.bytes, text.count);
+
+    rm_page* p = parse(b.bytes, b.count);
+    RM_CHECK(p && p->skipped_blocks == 0 && p->has_text &&
+                 p->text.column_width == (bad_varuint ? 936.0 : 1152.0),
+             "TAG_TEXT_SETTINGS bad_varuint=%d width=%g", bad_varuint,
+             p ? p->text.column_width : -1.0);
+    rm_page_free(p);
+    rm_edit_session* s = nullptr;
+    RM_CHECK(rm_edit_open(b.bytes, b.count, &s, nullptr) == RM_OK, "open");
+    rm_draft_point pt = rm_draft_point_make(0, 0);
+    rm_draft_stroke st =
+        rm_draft_stroke_make(RM_TOOL_FINELINER_2, RM_COLOR_BLACK, &pt, 1);
+    RM_CHECK(
+        rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 55},
+                              (rm_item_id){0}, (rm_item_id){0}, &st, nullptr) ==
+            (bad_varuint ? RM_OK : RM_ERR_INVALID_ARGUMENT),
+        "published width_stamp must collide when reachable (bad=%d)",
+        bad_varuint);
+    RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 99},
+                                   (rm_item_id){0}, (rm_item_id){0}, &st,
+                                   nullptr) == RM_OK,
+             "fresh stroke insert succeeds (bad=%d)", bad_varuint);
+    rm_edit_close(s);
+    rm_buf bufs[] = {b, list, inner, items, text, pos, settings, row, val};
+    for (size_t i = 0; i < sizeof bufs / sizeof *bufs; ++i)
+      rm_buf_free(&bufs[i]);
+  }
 }
 
 /* A highlight's block: the preamble, then the value with the colour, one
  * rectangle and whatever tail the case asks for. */
-static void append_glyph(rm_buf* page, uint32_t color, bool first_last,
-                         bool has_argb, uint32_t argb) {
+static void append_glyph_with_tail(rm_buf* page, uint32_t color,
+                                   bool first_last, uint8_t kind,
+                                   const rm_buf* tail) {
   rm_buf rectangles = {0}, value = {0}, item = {0};
   rm_write_varuint(&rectangles, 1);
   const double numbers[] = {10, 20, 30, 40};
   for (size_t i = 0; i < 4; i += 1) rm_write_f64(&rectangles, numbers[i]);
 
-  rm_buf_append_byte(&value, 1); /* value type: glyph */
+  rm_buf_append_byte(&value, kind);
   if (!first_last) {
     rm_write_tag(&value, 2, RM_TAG_BYTE4);
     rm_write_u32(&value, 0);
@@ -237,16 +411,7 @@ static void append_glyph(rm_buf* page, uint32_t color, bool first_last,
   rm_write_tag(&value, 4, RM_TAG_BYTE4);
   rm_write_u32(&value, color);
   rm_write_block(&value, 6, rectangles.bytes, rectangles.count);
-  if (first_last) {
-    rm_write_id(&value, 7, rm_crdt_make(1, 300));
-    rm_write_id(&value, 8, rm_crdt_make(1, 304));
-    rm_write_tag(&value, 9, RM_TAG_BYTE1);
-    rm_buf_append_byte(&value, 1);
-  }
-  if (has_argb) {
-    rm_write_tag(&value, 10, RM_TAG_BYTE4);
-    rm_write_u32(&value, argb);
-  }
+  rm_buf_append(&value, tail->bytes, tail->count);
 
   rm_write_id(&item, 1, rm_crdt_make(0, 11));
   rm_write_id(&item, 2, rm_crdt_make(1, 50));
@@ -259,6 +424,162 @@ static void append_glyph(rm_buf* page, uint32_t color, bool first_last,
   rm_buf_free(&rectangles);
   rm_buf_free(&value);
   rm_buf_free(&item);
+}
+
+static void append_glyph(rm_buf* page, uint32_t color, bool first_last,
+                         bool has_argb, uint32_t argb) {
+  rm_buf tail = {0};
+  if (first_last) {
+    rm_write_id(&tail, 7, rm_crdt_make(1, 300));
+    rm_write_id(&tail, 8, rm_crdt_make(1, 304));
+    rm_write_tag(&tail, 9, RM_TAG_BYTE1);
+    rm_buf_append_byte(&tail, 1);
+  }
+  if (has_argb) {
+    rm_write_tag(&tail, 10, RM_TAG_BYTE4);
+    rm_write_u32(&tail, argb);
+  }
+
+  append_glyph_with_tail(page, color, first_last, RM_VALUE_GLYPH_ITEM, &tail);
+  rm_buf_free(&tail);
+}
+
+static void glyph_range_edits_preserve_field_order(void) {
+  const record row = {.id = {.author = 1, .counter = 300}, .text = "abc"};
+
+  const struct {
+    size_t start;
+    const char* replacement;
+    uint64_t first, last;
+    bool reversed;
+  } cases[] = {
+      {0, "a", 1000, 302, false},
+      {2, "c", 300, 1000, false},
+      {0, "abc", 1000, 1002, true},
+  };
+
+  for (size_t mode = 0; mode < sizeof cases / sizeof *cases; ++mode) {
+    rm_buf page, tail = {0}, expected = {0};
+    start_page(&page);
+    append_root_text(&page, &row, 1, 936, NAN);
+    bool reversed = cases[mode].reversed;
+    const char* replacement = cases[mode].replacement;
+
+    /* An identical spelling can acquire fresh character IDs. Keep the
+     * opaque field between the endpoints wherever the tablet left it. */
+    for (unsigned edited = 0; edited < 2; ++edited) {
+      rm_crdt_id first = rm_crdt_make(1, edited ? cases[mode].first : 300);
+      rm_crdt_id last = rm_crdt_make(1, edited ? cases[mode].last : 302);
+
+      tail.count = 0;
+      rm_write_id(&tail, reversed ? 8 : 7, reversed ? last : first);
+      rm_write_tag(&tail, 11, RM_TAG_BYTE1);
+      rm_buf_append_byte(&tail, 42);
+      rm_write_id(&tail, reversed ? 7 : 8, reversed ? first : last);
+      rm_write_tag(&tail, 9, RM_TAG_BYTE1);
+      rm_buf_append_byte(&tail, 1);
+      append_glyph_with_tail(edited ? &expected : &page, RM_COLOR_YELLOW, true,
+                             3, &tail);
+    }
+
+    rm_edit_session* session = nullptr;
+    RM_CHECK(rm_edit_open(page.bytes, page.count, &session, nullptr) == RM_OK,
+             "open glyph range %zu", mode);
+    RM_CHECK(rm_edit_replace_text(session, cases[mode].start,
+                                  strlen(replacement), replacement,
+                                  (rm_item_id){1, 1000}, nullptr) == RM_OK,
+             "replace glyph endpoint characters %zu", mode);
+
+    size_t size = 0;
+    const uint8_t* bytes = rm_edit_bytes(session, &size);
+    RM_CHECK(has_bytes(bytes, size, expected.bytes, expected.count),
+             "glyph range %zu has the exact updated endpoints and opaque field",
+             mode);
+    rm_edit_close(session);
+    rm_buf_free(&expected);
+    rm_buf_free(&tail);
+    rm_buf_free(&page);
+  }
+}
+
+static void edits_use_the_displayed_root(void) {
+  rm_buf page;
+  start_page(&page);
+  const record earlier = {.id = {.author = 1, .counter = 20},
+                          .text = "earlier"};
+  const record visible = {.id = {.author = 1, .counter = 40}, .text = "shown"};
+  const record later = {.id = {.author = 1, .counter = 60},
+                        .text = "no origin"};
+
+  append_root_text(&page, &earlier, 1, 740, NAN);
+  size_t prefix = page.count;
+  append_root_text(&page, &visible, 1, 936, NAN);
+
+  rm_page* parsed = parse(page.bytes, page.count);
+  expect_lines(parsed, (const char*[]){"shown"}, 1,
+               "last root with a finite origin");
+  rm_page_free(parsed);
+
+  rm_edit_session* session = nullptr;
+  RM_CHECK(rm_edit_open(page.bytes, page.count, &session, nullptr) == RM_OK,
+           "open repeated roots");
+  RM_CHECK(rm_edit_replace_text(session, 5, 0, "!", (rm_item_id){1, 100},
+                                nullptr) == RM_OK,
+           "edit displayed root");
+  size_t size = 0;
+  const uint8_t* bytes = rm_edit_bytes(session, &size);
+  parsed = parse(bytes, size);
+  expect_lines(parsed, (const char*[]){"shown!"}, 1, "edited displayed root");
+  RM_CHECK(size >= prefix && memcmp(bytes, page.bytes, prefix) == 0,
+           "the earlier root survives byte for byte");
+  rm_page_free(parsed);
+  rm_edit_close(session);
+  append_root_text(&page, &later, 1, NAN, NAN);
+  parsed = parse(page.bytes, page.count);
+  expect_lines(parsed, (const char*[]){"shown"}, 1,
+               "a nonfinite origin leaves the preceding root visible");
+  RM_CHECK(parsed && parsed->skipped_blocks == 1,
+           "the unpublished root is counted");
+  rm_page_free(parsed);
+  RM_CHECK(rm_edit_open(page.bytes, page.count, &session, nullptr) ==
+               RM_ERR_INCOMPLETE_PAGE,
+           "a skipped root keeps the page read-only");
+  rm_edit_close(session);
+  rm_buf_free(&page);
+}
+
+static void edit_root_without_lists(void) {
+  rm_buf page, root = {0}, pos = {0};
+  start_page(&page);
+  rm_write_id(&root, 1, RM_CRDT_NONE);
+  rm_write_f64(&pos, -370);
+  rm_write_f64(&pos, 234);
+  rm_write_block(&root, 3, pos.bytes, pos.count);
+  rm_write_top_block(&page, RM_BLOCK_ROOT_TEXT, 1, 1, root.bytes, root.count);
+
+  rm_edit_session* session = nullptr;
+  RM_CHECK(rm_edit_open(page.bytes, page.count, &session, nullptr) == RM_OK,
+           "open root without lists");
+  RM_CHECK(rm_edit_replace_text(session, 0, 0, "été", (rm_item_id){1, 20},
+                                nullptr) == RM_OK,
+           "insert into root without lists");
+  size_t size = 0;
+  const uint8_t* before = rm_edit_bytes(session, &size);
+  rm_page* parsed = parse(before, size);
+  expect_lines(parsed, (const char*[]){"été"}, 1, "new lists");
+  RM_CHECK(
+      parsed && parsed->text.origin_x == -370 && parsed->text.origin_y == 234,
+      "text origin survives insertion");
+  rm_page_free(parsed);
+
+  RM_CHECK(rm_edit_replace_text(session, 2, 2, "", (rm_item_id){0}, nullptr) ==
+                   RM_ERR_INVALID_ARGUMENT &&
+               rm_edit_bytes(session, &size) == before,
+           "range ending past the last scalar leaves text intact");
+  rm_edit_close(session);
+  rm_buf_free(&pos);
+  rm_buf_free(&root);
+  rm_buf_free(&page);
 }
 
 static rm_page* glyph_page(uint32_t color, bool first_last, bool has_argb,
@@ -312,6 +633,7 @@ static void the_highlighters_blue_and_orange_read_under_their_own_indexes(
       .point_count = 2,
   };
   rm_page_draft draft = {
+      .author = {1},
       .sheet = {1404, 1872, 1404, 1872},
       .column = {936, 1},
       .strokes = &stroke,
@@ -339,7 +661,8 @@ static void gray_marker_and_masked_eraser(void) {
   rm_draft_point point = rm_draft_point_make(3, 4);
   rm_draft_stroke stroke = rm_draft_stroke_make(
       RM_TOOL_MASKED_ERASER, RM_COLOR_HIGHLIGHTER_GRAY, &point, 1);
-  rm_page_draft draft = {.sheet = {1404, 1872, 1404, 1872},
+  rm_page_draft draft = {.author = {1},
+                         .sheet = {1404, 1872, 1404, 1872},
                          .column = {936, 1},
                          .strokes = &stroke,
                          .stroke_count = 1};
@@ -456,6 +779,21 @@ static void a_marker_code_cut_short_leaves_the_record_text(void) {
   expect_lines(parsed, (const char* const[]){"ab"}, 1, "cut code");
   RM_CHECK(parsed != nullptr && parsed->skipped_blocks == 0, "nothing lost");
   rm_page_free(parsed);
+
+  /* Appending past cut marker preserves original row bytes (R159). */
+  rm_edit_session* s = nullptr;
+  RM_CHECK(rm_edit_open(page.bytes, page.count, &s, nullptr) == RM_OK &&
+               rm_edit_replace_text(s, 2, 0, "!", (rm_item_id){1, 90},
+                                    nullptr) == RM_OK,
+           "append after cut marker row");
+  size_t esz = 0;
+  const uint8_t* eb = rm_edit_bytes(s, &esz);
+  rm_page* ep = parse(eb, esz);
+  expect_lines(ep, (const char* const[]){"ab!"}, 1, "cut code append");
+  RM_CHECK(ep && ep->skipped_blocks == 0, "append keeps zero skipped");
+  rm_page_free(ep);
+  rm_edit_close(s);
+
   rm_buf bufs[] = {page, list, inner, items, text, position, value, item};
   for (size_t i = 0; i < sizeof bufs / sizeof *bufs; i += 1)
     rm_buf_free(&bufs[i]);
@@ -535,27 +873,6 @@ static void a_highlight_tail_cut_short_keeps_the_highlight(void) {
 }
 
 /* A layer node under the root and its link, so that strokes on it are drawn. */
-static const rm_crdt_id LAYER = {.counter = 11, .author = 1};
-
-static void append_layer(rm_buf* page) {
-  rm_buf state = {0}, group = {0}, value = {0};
-  rm_write_id(&state, 1, LAYER);
-  rm_write_id(&group, 1, rm_crdt_make(0, 1));
-  rm_write_id(&group, 2, rm_crdt_make(1, 12));
-  rm_write_id(&group, 3, RM_CRDT_NONE);
-  rm_write_id(&group, 4, RM_CRDT_NONE);
-  rm_write_tag(&group, 5, RM_TAG_BYTE4);
-  rm_write_u32(&group, 0);
-  rm_buf_append_byte(&value, 2);
-  rm_write_id(&value, 2, LAYER);
-  rm_write_block(&group, 6, value.bytes, value.count);
-  rm_write_top_block(page, 2, 1, 1, state.bytes, state.count);
-  rm_write_top_block(page, 4, 1, 1, group.bytes, group.count);
-  rm_buf_free(&state);
-  rm_buf_free(&group);
-  rm_buf_free(&value);
-}
-
 /* A stroke of one point under `parent`, in point format `version`, with `tail`
  * appended to its value. */
 static void append_one_point_stroke(rm_buf* page, uint8_t version,
@@ -753,14 +1070,48 @@ static void a_source_id_cut_short_is_no_source(void) {
   /* Whole, the same tail names its source. */
   rm_buf whole = {0};
   rm_write_id(&whole, 9, rm_crdt_make(1, 17));
-  parsed =
-      one_point_stroke(2, point.bytes, point.count, whole.bytes, whole.count);
+  rm_buf whole_page;
+  start_page(&whole_page);
+  append_layer(&whole_page);
+  append_one_point_stroke(&whole_page, 2, LAYER, rm_crdt_make(1, 30),
+                          point.bytes, point.count, whole.bytes, whole.count);
+  parsed = parse(whole_page.bytes, whole_page.count);
   RM_CHECK(
       parsed != nullptr && parsed->stroke_count == 1 &&
           parsed->strokes[0].has_source_id &&
           rm_item_id_equal(parsed->strokes[0].source_id, (rm_item_id){1, 17}),
       "a whole tag 9 is the source");
   rm_page_free(parsed);
+
+  /* Editor collision checks for truncated vs complete optional tag 9 (R79). */
+  rm_buf cut_page;
+  start_page(&cut_page);
+  append_layer(&cut_page);
+  append_one_point_stroke(&cut_page, 2, LAYER, rm_crdt_make(1, 30), point.bytes,
+                          point.count, cut, sizeof cut);
+  rm_edit_session* s = nullptr;
+  rm_draft_point pt = rm_draft_point_make(0, 0);
+  rm_draft_stroke ins =
+      rm_draft_stroke_make(RM_TOOL_FINELINER_2, RM_COLOR_BLACK, &pt, 1);
+  RM_CHECK(rm_edit_open(cut_page.bytes, cut_page.count, &s, nullptr) == RM_OK,
+           "open cut tag 9 page");
+  RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 17},
+                                 (rm_item_id){0}, (rm_item_id){0}, &ins,
+                                 nullptr) == RM_OK,
+           "truncated optional tag 9 inserts unused id cleanly");
+  rm_edit_close(s);
+
+  RM_CHECK(
+      rm_edit_open(whole_page.bytes, whole_page.count, &s, nullptr) == RM_OK,
+      "open whole tag 9 page");
+  RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 17},
+                                 (rm_item_id){0}, (rm_item_id){0}, &ins,
+                                 nullptr) == RM_ERR_INVALID_ARGUMENT,
+           "complete optional tag 9 rejects colliding id (1, 17)");
+  rm_edit_close(s);
+
+  rm_buf_free(&cut_page);
+  rm_buf_free(&whole_page);
   rm_buf_free(&whole);
   rm_buf_free(&point);
 }
@@ -842,6 +1193,7 @@ static void a_text_list_that_runs_out_keeps_what_it_holds(void) {
   };
   rm_buf page;
   start_page(&page);
+  append_layer(&page);
   append_root_text_declaring(&page, records, 2, 5, 936, NAN);
   rm_page* parsed = parse(page.bytes, page.count);
   const char* const lines[] = {"abcd"};
@@ -849,6 +1201,32 @@ static void a_text_list_that_runs_out_keeps_what_it_holds(void) {
   if (parsed != nullptr)
     RM_CHECK_EQ_SIZE(parsed->skipped_blocks, 0, "and nothing is lost");
   rm_page_free(parsed);
+
+  /* Extend with collision check, unrelated stroke edit, and public text
+   * replace verifying count updates to actual rows (R78, R96). */
+  rm_edit_session* s = nullptr;
+  RM_CHECK(rm_edit_open(page.bytes, page.count, &s, nullptr) == RM_OK, "open");
+  rm_draft_point pt = rm_draft_point_make(0, 0);
+  rm_draft_stroke st =
+      rm_draft_stroke_make(RM_TOOL_FINELINER_2, RM_COLOR_BLACK, &pt, 1);
+  RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 20},
+                                 (rm_item_id){0}, (rm_item_id){0}, &st,
+                                 nullptr) == RM_ERR_INVALID_ARGUMENT,
+           "short list reserves actual row id (1, 20)");
+  RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 90},
+                                 (rm_item_id){0}, (rm_item_id){0}, &st,
+                                 nullptr) == RM_OK,
+           "unrelated stroke insert succeeds on short list");
+  RM_CHECK(
+      rm_edit_replace_text(s, 4, 0, "!", (rm_item_id){1, 95}, nullptr) == RM_OK,
+      "text replace succeeds on short list");
+  size_t esz = 0;
+  const uint8_t* eb = rm_edit_bytes(s, &esz);
+  rm_page* ep = parse(eb, esz);
+  expect_lines(ep, (const char* const[]){"abcd!"}, 1, "short list edited");
+  RM_CHECK(ep && ep->skipped_blocks == 0, "short list edited cleanly");
+  rm_page_free(ep);
+  rm_edit_close(s);
   rm_buf_free(&page);
 }
 
@@ -862,10 +1240,12 @@ static void a_text_record_that_fails_inside_costs_the_list(void) {
        .text = "ab",
        .trailing = no_deleted_field,
        .trailing_count = sizeof no_deleted_field},
+      {.id = {.counter = 40, .author = 1}, .text = "ok"},
   };
   rm_buf page;
   start_page(&page);
-  append_root_text_declaring(&page, records, 1, 2, 936, NAN);
+  append_layer(&page);
+  append_root_text_declaring(&page, records, 2, 3, 936, NAN);
   rm_page* parsed = parse(page.bytes, page.count);
   RM_CHECK(parsed != nullptr && parsed->has_text,
            "the block still reads as text");
@@ -875,6 +1255,32 @@ static void a_text_record_that_fails_inside_costs_the_list(void) {
              "with nothing typed in it");
   }
   rm_page_free(parsed);
+
+  /* R222: unrelated stroke insertion succeeds preserving RootText verbatim,
+   * collisions against Row 2's partial preamble ID (1:30) and Row 3's ID
+   * (1:40) return RM_ERR_INVALID_ARGUMENT, while rm_edit_replace_text refuses
+   * with RM_ERR_MALFORMED_PAGE. */
+  rm_edit_session* s = nullptr;
+  RM_CHECK(rm_edit_open(page.bytes, page.count, &s, nullptr) == RM_OK, "open");
+  rm_draft_point pt = rm_draft_point_make(0, 0);
+  rm_draft_stroke st =
+      rm_draft_stroke_make(RM_TOOL_FINELINER_2, RM_COLOR_BLACK, &pt, 1);
+  RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 30},
+                                 (rm_item_id){0}, (rm_item_id){0}, &st,
+                                 nullptr) == RM_ERR_INVALID_ARGUMENT,
+           "partial Row 2 preamble ID (1:30) reserved");
+  RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 40},
+                                 (rm_item_id){0}, (rm_item_id){0}, &st,
+                                 nullptr) == RM_ERR_INVALID_ARGUMENT,
+           "following Row 3 ID (1:40) past broken Row 2 is reserved");
+  RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 90},
+                                 (rm_item_id){0}, (rm_item_id){0}, &st,
+                                 nullptr) == RM_OK,
+           "unrelated stroke insert succeeds");
+  RM_CHECK(rm_edit_replace_text(s, 0, 0, "x", (rm_item_id){1, 95}, nullptr) ==
+               RM_ERR_MALFORMED_PAGE,
+           "rm_edit_replace_text refuses broken rows list");
+  rm_edit_close(s);
   rm_buf_free(&page);
 }
 
@@ -1324,12 +1730,12 @@ static void unlinked_children_inherit_layer_visibility(void) {
 static void scene_preferences_follow_stamps(void) {
   rm_buf b;
   start_page(&b);
-  for (int i = 0; i < 2; i++) {
+  for (uint64_t i = 0; i < 2; i++) {
     rm_crdt_id stamp = rm_crdt_make(1, 50 - i);
     uint8_t setting = i ? 0 : 2;
     rm_buf scene = {0};
-    rm_write_stamped_u8(&scene, 2, stamp, i);
-    rm_write_stamped_u8(&scene, 3, stamp, i);
+    rm_write_stamped_u8(&scene, 2, stamp, (uint8_t)i);
+    rm_write_stamped_u8(&scene, 3, stamp, (uint8_t)i);
     rm_write_stamped_block(&scene, 9, stamp, &setting, 1);
     rm_write_top_block(&b, 13, 1, 1, scene.bytes, scene.count);
     rm_buf_free(&scene);
@@ -1416,7 +1822,7 @@ static void paragraph_style_and_width_follow_stamps(void) {
   start_page(&b);
   rm_write_varuint(&entries, 2);
   rm_write_id(&root, 1, RM_CRDT_NONE);
-  for (int i = 0; i < 2; i++) {
+  for (uint64_t i = 0; i < 2; i++) {
     rm_crdt_id stamp = rm_crdt_make(1, 20 - i);
     uint8_t format[] = {0x11, (uint8_t)(i ? 1 : 3)};
     rm_write_bare_id(&entries, RM_CRDT_NONE);
@@ -1504,7 +1910,7 @@ static void disconnected_scene_chains_honor_known_neighbours(void) {
 static void stamped_sheet_size_overrides_legacy_size(void) {
   rm_buf b;
   start_page(&b);
-  for (int i = 0; i < 2; i++) {
+  for (uint64_t i = 0; i < 2; i++) {
     rm_buf scene = {0}, size = {0};
     rm_write_f64(&size, 100);
     rm_write_f64(&size, 200);
@@ -1548,8 +1954,10 @@ static void stale_group_links_do_not_discard_sibling_order(void) {
   RM_CHECK(rm_edit_open(b.bytes, b.count, &session, nullptr) == RM_OK,
            "open stale link");
   rm_draft_point point = rm_draft_point_make(0, 0);
-  rm_draft_stroke stroke = {
-      .tool = RM_TOOL_FINELINER_2, .points = &point, .point_count = 1};
+  rm_draft_stroke stroke = {.tool = RM_TOOL_FINELINER_2,
+                            .thickness = 2,
+                            .points = &point,
+                            .point_count = 1};
   RM_CHECK(
       rm_edit_insert_stroke(session, rm_item_id_of(LAYER), (rm_item_id){1, 300},
                             (rm_item_id){1, 52}, (rm_item_id){0}, &stroke,
@@ -1591,7 +1999,1333 @@ static void repeated_node_fields_use_the_winning_stamp(void) {
   }
 }
 
+static void nonfinite_stroke_starting_length_is_kept_and_normalized(void) {
+  rm_buf b, value = {0}, pts = {0}, line = {0};
+  start_page(&b);
+  append_layer(&b);
+  for (int i = 0; i < 2; ++i) {
+    rm_write_f32(&pts, (float)i * 10.0f);
+    rm_write_f32(&pts, 0.0f);
+    rm_write_u16(&pts, 0);
+    rm_write_u16(&pts, 8);
+    rm_buf_append_byte(&pts, 0);
+    rm_buf_append_byte(&pts, 6);
+  }
+  rm_buf_append_byte(&value, 0x03);
+  rm_write_tag(&value, 1, RM_TAG_BYTE4);
+  rm_write_u32(&value, RM_TOOL_FINELINER_2);
+  rm_write_tag(&value, 2, RM_TAG_BYTE4);
+  rm_write_u32(&value, RM_COLOR_BLACK);
+  rm_write_tag(&value, 3, RM_TAG_BYTE8);
+  rm_write_f64(&value, 2.0);
+  rm_write_tag(&value, 4, RM_TAG_BYTE4);
+  rm_write_f32(&value, NAN);
+  rm_write_block(&value, 5, pts.bytes, pts.count);
+
+  rm_write_id(&line, 1, LAYER);
+  rm_write_id(&line, 2, rm_crdt_make(1, 50));
+  rm_write_id(&line, 3, RM_CRDT_NONE);
+  rm_write_id(&line, 4, RM_CRDT_NONE);
+  rm_write_tag(&line, 5, RM_TAG_BYTE4);
+  rm_write_u32(&line, 0);
+  rm_write_block(&line, 6, value.bytes, value.count);
+  rm_write_top_block(&b, 5, 2, 2, line.bytes, line.count);
+
+  rm_page* p = parse(b.bytes, b.count);
+  RM_CHECK(p && p->stroke_count == 1 && p->skipped_blocks == 0,
+           "stroke with NaN starting length still parses cleanly");
+  rm_page_free(p);
+
+  rm_edit_session* s = nullptr;
+  RM_CHECK(rm_edit_open(b.bytes, b.count, &s, nullptr) == RM_OK, "open");
+  RM_CHECK(rm_edit_transform_stroke(s, (rm_item_id){1, 50}, (rm_item_id){1, 51},
+                                    (rm_edit_transform){1, 0, 0, 1, 5, 0},
+                                    nullptr) == RM_OK,
+           "transform normalizes NaN starting length");
+  rm_page* p2 = session_page(s);
+  RM_CHECK(p2 && p2->stroke_count == 1 && p2->skipped_blocks == 0 &&
+               p2->strokes[0].point_count == 2,
+           "transformed stroke still parses cleanly");
+  rm_page_free(p2);
+  size_t sz = 0;
+  const uint8_t* bytes = rm_edit_bytes(s, &sz);
+  rm_reader r = {.data = bytes, .size = sz, .offset = RM_HEADER_LENGTH};
+  bool found_zero_start = false;
+  while (rm_reader_remaining(&r) >= 8) {
+    rm_block_header hdr;
+    if (rm_read_block_header(&r, &hdr) != RM_OK) break;
+    if (hdr.type == RM_BLOCK_SCENE_LINE_ITEM) {
+      rm_reader body = r;
+      body.size = hdr.end;
+      rm_item_preamble pre;
+      if (rm_parse_item_preamble(&body, &pre) == RM_OK && !pre.deleted &&
+          rm_match_tag(&body, 6, RM_TAG_LENGTH4)) {
+        rm_reader val;
+        uint8_t kind = 0;
+        uint32_t u32 = 0;
+        double d = 0;
+        float start = -1.0f;
+        if (rm_read_subblock(&body, &val) == RM_OK &&
+            rm_read_u8(&val, &kind) == RM_OK &&
+            rm_expect_tag(&val, 1, RM_TAG_BYTE4) == RM_OK &&
+            rm_read_u32(&val, &u32) == RM_OK &&
+            rm_expect_tag(&val, 2, RM_TAG_BYTE4) == RM_OK &&
+            rm_read_u32(&val, &u32) == RM_OK &&
+            rm_expect_tag(&val, 3, RM_TAG_BYTE8) == RM_OK &&
+            rm_read_f64(&val, &d) == RM_OK &&
+            rm_expect_tag(&val, 4, RM_TAG_BYTE4) == RM_OK &&
+            rm_read_f32(&val, &start) == RM_OK && start == 0.0f) {
+          found_zero_start = true;
+        }
+      }
+    }
+    r.offset = hdr.end;
+  }
+  RM_CHECK(found_zero_start, "normalized starting length is 0.0");
+
+  /* In-range partial cut (0, 1) and full cut (0, 2) on fresh copies (R70). */
+  RM_CHECK(rm_edit_undo(s), "undo transform");
+  RM_CHECK(rm_edit_cut_stroke(s, (rm_item_id){1, 50}, (rm_item_id){1, 60}, 0, 1,
+                              nullptr) == RM_OK,
+           "partial cut of NaN-start stroke succeeds");
+  rm_page* cut1 = session_page(s);
+  RM_CHECK(cut1 && cut1->stroke_count == 1 && cut1->strokes[0].point_count == 1,
+           "partial cut leaves 1 point");
+  rm_page_free(cut1);
+  RM_CHECK(rm_edit_undo(s), "undo partial cut");
+  RM_CHECK(rm_edit_cut_stroke(s, (rm_item_id){1, 50}, (rm_item_id){1, 70}, 0, 2,
+                              nullptr) == RM_OK,
+           "full cut of NaN-start stroke succeeds");
+  rm_page* cut2 = session_page(s);
+  RM_CHECK(cut2 && cut2->stroke_count == 0, "full cut deletes stroke");
+  rm_page_free(cut2);
+  rm_edit_close(s);
+
+  /* Finite control partial cut. */
+  rm_buf bfin, vfin = {0}, lfin = {0};
+  start_page(&bfin);
+  append_layer(&bfin);
+  rm_buf_append_byte(&vfin, 0x03);
+  rm_write_tag(&vfin, 1, RM_TAG_BYTE4);
+  rm_write_u32(&vfin, RM_TOOL_FINELINER_2);
+  rm_write_tag(&vfin, 2, RM_TAG_BYTE4);
+  rm_write_u32(&vfin, RM_COLOR_BLACK);
+  rm_write_tag(&vfin, 3, RM_TAG_BYTE8);
+  rm_write_f64(&vfin, 2.0);
+  rm_write_tag(&vfin, 4, RM_TAG_BYTE4);
+  rm_write_f32(&vfin, 1.5f);
+  rm_write_block(&vfin, 5, pts.bytes, pts.count);
+  rm_write_id(&lfin, 1, LAYER);
+  rm_write_id(&lfin, 2, rm_crdt_make(1, 50));
+  rm_write_id(&lfin, 3, RM_CRDT_NONE);
+  rm_write_id(&lfin, 4, RM_CRDT_NONE);
+  rm_write_tag(&lfin, 5, RM_TAG_BYTE4);
+  rm_write_u32(&lfin, 0);
+  rm_write_block(&lfin, 6, vfin.bytes, vfin.count);
+  rm_write_top_block(&bfin, 5, 2, 2, lfin.bytes, lfin.count);
+  RM_CHECK(rm_edit_open(bfin.bytes, bfin.count, &s, nullptr) == RM_OK &&
+               rm_edit_cut_stroke(s, (rm_item_id){1, 50}, (rm_item_id){1, 80},
+                                  1, 1, nullptr) == RM_OK,
+           "finite control cut succeeds");
+  rm_edit_close(s);
+  rm_buf_free(&lfin);
+  rm_buf_free(&vfin);
+  rm_buf_free(&bfin);
+
+  rm_buf_free(&b);
+  rm_buf_free(&value);
+  rm_buf_free(&pts);
+  rm_buf_free(&line);
+}
+
+static void deleted_scene_items_with_payload_stay_tombstones(void) {
+  rm_buf b, value = {0}, pts = {0}, line = {0};
+  start_page(&b);
+  rm_buf_append_byte(&value, 0x03);
+  rm_write_tag(&value, 1, RM_TAG_BYTE4);
+  rm_write_u32(&value, RM_TOOL_HIGHLIGHTER_1);
+  rm_write_tag(&value, 2, RM_TAG_BYTE4);
+  rm_write_u32(&value, RM_COLOR_YELLOW);
+  rm_write_tag(&value, 3, RM_TAG_BYTE8);
+  rm_write_f64(&value, 2.0);
+  rm_write_tag(&value, 4, RM_TAG_BYTE4);
+  rm_write_f32(&value, 0.0f);
+  rm_write_f32(&pts, NAN);
+  rm_write_f32(&pts, 0.0f);
+  rm_write_u16(&pts, 0);
+  rm_write_u16(&pts, 12);
+  rm_buf_append_byte(&pts, 0);
+  rm_buf_append_byte(&pts, 6);
+  rm_write_block(&value, 5, pts.bytes, pts.count);
+
+  rm_write_id(&line, 1, LAYER);
+  rm_write_id(&line, 2, rm_crdt_make(1, 60));
+  rm_write_id(&line, 3, RM_CRDT_NONE);
+  rm_write_id(&line, 4, RM_CRDT_NONE);
+  rm_write_tag(&line, 5, RM_TAG_BYTE4);
+  rm_write_u32(&line, 1); /* deleted != 0 */
+  rm_write_block(&line, 6, value.bytes, value.count);
+  rm_write_top_block(&b, 5, 2, 2, line.bytes, line.count);
+
+  rm_page* p = parse(b.bytes, b.count);
+  RM_CHECK(p && p->stroke_count == 0 && p->skipped_blocks == 0,
+           "deleted stroke with payload is not drawn and not skipped");
+  rm_page_free(p);
+
+  rm_item_id* ids = nullptr;
+  size_t count = 0;
+  RM_CHECK(
+      rm_highlighter_items(b.bytes, b.count, &ids, &count, nullptr) == RM_OK &&
+          count == 0,
+      "deleted highlighter stroke with payload is not returned");
+  rm_item_ids_free(ids);
+  rm_buf_free(&b);
+  rm_buf_free(&value);
+  rm_buf_free(&pts);
+  rm_buf_free(&line);
+}
+
+static void bare_image_key_starting_with_0x2c_and_oversized_key(void) {
+  rm_buf b, node = {0}, grp = {0}, gval = {0}, map = {0}, rows = {0}, row = {0},
+            name = {0}, img = {0}, val = {0}, verts = {0};
+  start_page(&b);
+  rm_write_id(&node, 1, LAYER);
+  rm_write_top_block(&b, 2, 1, 2, node.bytes, node.count);
+  rm_write_id(&grp, 1, rm_crdt_make(0, 1));
+  rm_write_id(&grp, 2, rm_crdt_make(1, 5));
+  rm_write_id(&grp, 3, RM_CRDT_NONE);
+  rm_write_id(&grp, 4, RM_CRDT_NONE);
+  rm_write_tag(&grp, 5, RM_TAG_BYTE4);
+  rm_write_u32(&grp, 0);
+  rm_buf_append_byte(&gval, 2);
+  rm_write_id(&gval, 2, LAYER);
+  rm_write_block(&grp, 6, gval.bytes, gval.count);
+  rm_write_top_block(&b, 4, 1, 1, grp.bytes, grp.count);
+  rm_buf_free(&node);
+  rm_buf_free(&grp);
+  rm_buf_free(&gval);
+
+  /* Image blocks covering:
+   *  k=0: bare 16-byte key starting with 0x2C (tag 2 LENGTH4),
+   *  k=1: bare 16-byte key starting with 0x1F (tag 1 ID) + {1, 77} payload,
+   *  k=2: stamped unwrapped 16-byte key (tag 1 stamp + 16 raw bytes). */
+  const uint8_t prefixes[3] = {0x2Cu, 0x1Fu, 0x44u};
+  rm_write_varuint(&verts, 16);
+  for (int i = 0; i < 4; ++i) {
+    float x = (i == 1 || i == 2) ? 10.0f : 0.0f;
+    float y = (i >= 2) ? 10.0f : 0.0f;
+    rm_write_f32(&verts, x);
+    rm_write_f32(&verts, y);
+    rm_write_f32(&verts, i == 1 || i == 2 ? 1.0f : 0.0f);
+    rm_write_f32(&verts, i >= 2 ? 1.0f : 0.0f);
+  }
+  const char* names[3] = {"bare2c.png", "bare1f.png", "stamped_bare.png"};
+  for (size_t k = 0; k < 3; ++k) {
+    uint8_t kbuf[16];
+    memset(kbuf, (int)(0x33u + k), sizeof(kbuf));
+    kbuf[0] = prefixes[k];
+    if (k == 1) {
+      kbuf[1] = 1;
+      kbuf[2] = 77;
+    }
+
+    row.count = 0;
+    name.count = 0;
+    rows.count = 0;
+    map.count = 0;
+    rm_buf_append(&row, kbuf, sizeof(kbuf));
+    rm_write_string(&name, names[k]);
+    rm_write_stamped_block(&row, 1, rm_crdt_make(1, 10 + k), name.bytes,
+                           name.count);
+    rm_write_varuint(&rows, 1);
+    rm_write_block(&rows, 0, row.bytes, row.count);
+    rm_write_block(&map, 1, rows.bytes, rows.count);
+    rm_write_top_block(&b, 14, 1, 1, map.bytes, map.count);
+
+    val.count = 0;
+    img.count = 0;
+    rm_buf_append_byte(&val, 0x07);
+    if (k == 2) {
+      rm_buf stamped = {0};
+      rm_write_id(&stamped, 1, rm_crdt_make(1, 15));
+      rm_buf_append(&stamped, kbuf, sizeof(kbuf));
+      rm_write_block(&val, 1, stamped.bytes, stamped.count);
+      rm_buf_free(&stamped);
+    } else {
+      rm_write_block(&val, 1, kbuf, sizeof(kbuf));
+    }
+    rm_buf idx = {0};
+    rm_write_varuint(&idx, 6);
+    const uint32_t quad[6] = {0, 1, 2, 2, 3, 0};
+    for (int q = 0; q < 6; ++q) rm_write_u32(&idx, quad[q]);
+    rm_write_block(&val, 3, verts.bytes, verts.count);
+    rm_write_block(&val, 4, idx.bytes, idx.count);
+    rm_buf_free(&idx);
+
+    rm_write_id(&img, 1, LAYER);
+    rm_write_id(&img, 2, rm_crdt_make(1, 50 + k));
+    rm_write_id(&img, 3, k == 0 ? RM_CRDT_NONE : rm_crdt_make(1, 49 + k));
+    rm_write_id(&img, 4, RM_CRDT_NONE);
+    rm_write_tag(&img, 5, RM_TAG_BYTE4);
+    rm_write_u32(&img, 0);
+    rm_write_block(&img, 6, val.bytes, val.count);
+    rm_write_top_block(&b, 15, 2, 2, img.bytes, img.count);
+  }
+
+  rm_page* p = parse(b.bytes, b.count);
+  RM_CHECK(p && p->image_count == 3 && p->skipped_blocks == 0,
+           "bare 0x2C/0x1F and stamped unwrapped 16-byte image keys parse");
+  if (p && p->image_count == 3) {
+    RM_CHECK_EQ_STR(p->images[0].file.bytes, p->images[0].file.length,
+                    "bare2c.png", "bare 0x2C key resolves attachment name");
+    RM_CHECK_EQ_STR(p->images[1].file.bytes, p->images[1].file.length,
+                    "bare1f.png", "bare 0x1F key resolves attachment name");
+    RM_CHECK_EQ_STR(p->images[2].file.bytes, p->images[2].file.length,
+                    "stamped_bare.png",
+                    "stamped unwrapped key resolves attachment name");
+  }
+  rm_page_free(p);
+
+  /* Opaque 0x1F-prefixed image key bytes {0x1F, 1, 77} must not trigger a
+   * false CRDT ID collision on unused ID (1, 77). */
+  rm_edit_session* s = nullptr;
+  RM_CHECK(rm_edit_open(b.bytes, b.count, &s, nullptr) == RM_OK, "open");
+  RM_CHECK(rm_edit_set_node_name(s, rm_item_id_of(LAYER), (rm_item_id){1, 77},
+                                 "NoFalseCollision", nullptr) == RM_OK,
+           "0x1F bare image key does not collide with unused CRDT id (1, 77)");
+  rm_edit_close(s);
+
+  /* The attachment occupies the first sixteen bytes of its field. */
+  size_t original_size = b.count;
+  for (unsigned wrapped = 0; wrapped <= 1; ++wrapped) {
+    b.count = original_size;
+    val.count = 0;
+    img.count = 0;
+    rm_buf keyed = {0};
+    uint8_t oversized[17];
+    memset(oversized, 0x35, sizeof oversized);
+    oversized[0] = prefixes[2];
+    oversized[16] = 0xFF;
+    if (wrapped)
+      rm_write_block(&keyed, 2, oversized, sizeof oversized);
+    else
+      rm_buf_append(&keyed, oversized, sizeof oversized);
+    rm_buf_append_byte(&val, 0x07);
+    rm_write_block(&val, 1, keyed.bytes, keyed.count);
+    rm_write_block(&val, 3, verts.bytes, verts.count);
+    rm_buf idx = {0};
+    rm_write_varuint(&idx, 6);
+    const uint32_t quad[6] = {0, 1, 2, 2, 3, 0};
+    for (int q = 0; q < 6; ++q) rm_write_u32(&idx, quad[q]);
+    rm_write_block(&val, 4, idx.bytes, idx.count);
+    rm_buf_free(&idx);
+    rm_buf_free(&keyed);
+    rm_write_id(&img, 1, LAYER);
+    rm_write_id(&img, 2, rm_crdt_make(1, 55));
+    rm_write_id(&img, 3, RM_CRDT_NONE);
+    rm_write_id(&img, 4, RM_CRDT_NONE);
+    rm_write_tag(&img, 5, RM_TAG_BYTE4);
+    rm_write_u32(&img, 0);
+    rm_write_block(&img, 6, val.bytes, val.count);
+    rm_write_top_block(&b, 15, 2, 2, img.bytes, img.count);
+
+    p = parse(b.bytes, b.count);
+    RM_CHECK(p && p->image_count == 4 && p->skipped_blocks == 0,
+             "oversized image key resolves the attachment (wrapped=%u)",
+             wrapped);
+    rm_page_free(p);
+  }
+  rm_buf_free(&b);
+  rm_buf_free(&map);
+  rm_buf_free(&rows);
+  rm_buf_free(&row);
+  rm_buf_free(&name);
+  rm_buf_free(&img);
+  rm_buf_free(&val);
+  rm_buf_free(&verts);
+}
+
+static void non_sentinel_end_id_stays_unresolved_when_missing(void) {
+  rm_buf b, node = {0}, areg = {0}, group = {0}, val = {0}, root = {0},
+            list = {0}, inner = {0}, styles = {0}, both = {0}, pos = {0};
+  start_page(&b);
+  rm_crdt_id anchored = rm_crdt_make(1, 77);
+  rm_write_id(&node, 1, anchored);
+  rm_write_id(&areg, 1, rm_crdt_make(1, 1));
+  rm_write_id(&areg, 2, rm_crdt_make(1, UINT32_MAX));
+  rm_write_block(&node, 7, areg.bytes, areg.count);
+  rm_write_top_block(&b, 2, 1, 2, node.bytes, node.count);
+
+  rm_write_id(&group, 1, rm_crdt_make(0, 1));
+  rm_write_id(&group, 2, rm_crdt_make(1, 78));
+  rm_write_id(&group, 3, RM_CRDT_NONE);
+  rm_write_id(&group, 4, RM_CRDT_NONE);
+  rm_write_tag(&group, 5, RM_TAG_BYTE4);
+  rm_write_u32(&group, 0);
+  rm_buf_append_byte(&val, 2);
+  rm_write_id(&val, 2, anchored);
+  rm_write_block(&group, 6, val.bytes, val.count);
+  rm_write_top_block(&b, 4, 1, 1, group.bytes, group.count);
+
+  rm_write_id(&root, 1, RM_CRDT_NONE);
+  rm_buf row = {0}, rval = {0};
+  rm_write_id(&row, 2, rm_crdt_make(1, 20));
+  rm_write_id(&row, 3, RM_CRDT_NONE);
+  rm_write_id(&row, 4, RM_CRDT_NONE);
+  rm_write_tag(&row, 5, RM_TAG_BYTE4);
+  rm_write_u32(&row, 0);
+  rm_write_string(&rval, "Hi");
+  rm_write_block(&row, 6, rval.bytes, rval.count);
+  rm_write_varuint(&list, 1);
+  rm_write_block(&list, 0, row.bytes, row.count);
+  rm_write_block(&inner, 1, list.bytes, list.count);
+  rm_write_block(&both, 1, inner.bytes, inner.count);
+  rm_write_varuint(&styles, 0);
+  rm_write_block(&both, 2, styles.bytes, styles.count);
+  rm_write_block(&root, 2, both.bytes, both.count);
+  rm_write_f64(&pos, 0);
+  rm_write_f64(&pos, 0);
+  rm_write_block(&root, 3, pos.bytes, pos.count);
+  rm_write_top_block(&b, 0x07, 1, 1, root.bytes, root.count);
+
+  rm_buf pt_val = {0}, pts = {0}, line = {0};
+  rm_buf_append_byte(&pt_val, 0x03);
+  rm_write_tag(&pt_val, 1, RM_TAG_BYTE4);
+  rm_write_u32(&pt_val, RM_TOOL_FINELINER_2);
+  rm_write_tag(&pt_val, 2, RM_TAG_BYTE4);
+  rm_write_u32(&pt_val, 0);
+  rm_write_tag(&pt_val, 3, RM_TAG_BYTE8);
+  rm_write_f64(&pt_val, 1);
+  rm_write_tag(&pt_val, 4, RM_TAG_BYTE4);
+  rm_write_f32(&pt_val, 0);
+  rm_write_block(&pt_val, 5, pts.bytes, pts.count);
+  rm_write_id(&line, 1, anchored);
+  rm_write_id(&line, 2, rm_crdt_make(1, 79));
+  rm_write_id(&line, 3, RM_CRDT_NONE);
+  rm_write_id(&line, 4, RM_CRDT_NONE);
+  rm_write_tag(&line, 5, RM_TAG_BYTE4);
+  rm_write_u32(&line, 0);
+  rm_write_block(&line, 6, pt_val.bytes, pt_val.count);
+  rm_write_top_block(&b, 5, 2, 2, line.bytes, line.count);
+
+  rm_page* p = parse(b.bytes, b.count);
+  RM_CHECK(p && p->stroke_count == 1 && !p->strokes[0].has_anchor,
+           "author-1 UINT32_MAX target does not hijack text-end sentinel");
+  rm_page_free(p);
+
+  const uint64_t counters[] = {0xFFFFFFFFFFFEu, 0xFFFFFFFFFFFFu};
+  for (size_t i = 0; i < 2; ++i) {
+    node.count = 0;
+    areg.count = 0;
+    rm_write_id(&node, 1, anchored);
+    rm_write_id(&areg, 1, rm_crdt_make(1, 2 + i));
+    rm_write_id(&areg, 2, rm_crdt_make(1, counters[i]));
+    rm_write_block(&node, 7, areg.bytes, areg.count);
+    rm_write_top_block(&b, 2, 1, 2, node.bytes, node.count);
+    p = parse(b.bytes, b.count);
+    RM_CHECK(p && p->stroke_count == 1 && !p->strokes[0].has_anchor,
+             "author one may use sentinel counter %zu as a character ID", i);
+    rm_page_free(p);
+  }
+
+  /* Positive control: actual {0, 0xFFFFFFFFFFFF} end sentinel resolves. */
+  node.count = 0;
+  areg.count = 0;
+  rm_write_id(&node, 1, anchored);
+  rm_write_id(&areg, 1, rm_crdt_make(1, 4));
+  rm_write_id(&areg, 2, rm_crdt_make(0, 0xFFFF'FFFF'FFFFu));
+  rm_write_block(&node, 7, areg.bytes, areg.count);
+  rm_write_top_block(&b, 2, 1, 2, node.bytes, node.count);
+  p = parse(b.bytes, b.count);
+  RM_CHECK(p && p->stroke_count == 1 && p->strokes[0].has_anchor &&
+               p->strokes[0].anchor.paragraph == 0 &&
+               p->strokes[0].anchor.offset == 3,
+           "actual {0, 0xFFFFFFFFFFFF} sentinel resolves at end of text");
+  rm_page_free(p);
+  rm_buf_free(&areg);
+  rm_buf_free(&b);
+  rm_buf_free(&node);
+  rm_buf_free(&group);
+  rm_buf_free(&val);
+  rm_buf_free(&root);
+  rm_buf_free(&row);
+  rm_buf_free(&rval);
+  rm_buf_free(&list);
+  rm_buf_free(&inner);
+  rm_buf_free(&styles);
+  rm_buf_free(&both);
+  rm_buf_free(&pos);
+  rm_buf_free(&pt_val);
+  rm_buf_free(&pts);
+  rm_buf_free(&line);
+}
+
+static void nested_text_containers_and_settings_and_scene_info_preserve_data(
+    void) {
+  /* 1) Trailing bytes inside tag 1 of RootText must not lose paragraph styles.
+   */
+  rm_buf b, list = {0}, inner = {0}, items = {0}, styles = {0},
+            style_list = {0};
+  rm_buf both = {0}, root = {0}, pos = {0};
+  start_page(&b);
+  rm_buf row = {0}, val = {0};
+  rm_write_id(&row, 2, rm_crdt_make(1, 20));
+  rm_write_id(&row, 3, RM_CRDT_NONE);
+  rm_write_id(&row, 4, RM_CRDT_NONE);
+  rm_write_tag(&row, 5, RM_TAG_BYTE4);
+  rm_write_u32(&row, 0);
+  rm_write_string(&val, "Heading");
+  rm_write_block(&row, 6, val.bytes, val.count);
+  rm_write_varuint(&list, 1);
+  rm_write_block(&list, 0, row.bytes, row.count);
+  rm_write_block(&inner, 1, list.bytes, list.count);
+  /* Trailing unknown field inside outer tag 1 container. */
+  rm_write_tag(&inner, 2, RM_TAG_BYTE1);
+  rm_buf_append_byte(&inner, 1);
+  rm_write_block(&both, 1, inner.bytes, inner.count);
+
+  rm_write_varuint(&styles, 1);
+  rm_write_bare_id(&styles, RM_CRDT_NONE);
+  rm_write_id(&styles, 1, rm_crdt_make(1, 21));
+  uint8_t fmt[] = {0x11, 0x02};
+  rm_write_block(&styles, 2, fmt, sizeof fmt);
+  rm_write_block(&style_list, 1, styles.bytes, styles.count);
+  rm_write_block(&both, 2, style_list.bytes, style_list.count);
+
+  rm_write_id(&root, 1, RM_CRDT_NONE);
+  rm_write_block(&root, 2, both.bytes, both.count);
+  rm_write_f64(&pos, -468);
+  rm_write_f64(&pos, 234);
+  rm_write_block(&root, 3, pos.bytes, pos.count);
+  /* Settings block with unknown tag 2 before tag 1 width. */
+  rm_buf settings = {0}, unknown = {0};
+  rm_write_u32(&unknown, 42);
+  rm_write_block(&settings, 2, unknown.bytes, unknown.count);
+  rm_write_stamped_f32(&settings, 1, rm_crdt_make(1, 22), 1152.0f);
+  rm_write_block(&root, 5, settings.bytes, settings.count);
+  rm_write_top_block(&b, 0x07, 1, 1, root.bytes, root.count);
+
+  rm_page* p = parse(b.bytes, b.count);
+  RM_CHECK(p && p->has_text && p->text.paragraph_count == 1 &&
+               p->text.paragraphs[0].has_format &&
+               p->text.paragraphs[0].format.raw == 2,
+           "paragraph style survives trailing field in items container");
+  RM_CHECK(p && p->has_text && p->text.has_column_width &&
+               p->text.column_width == 1152.0,
+           "width setting survives preceding unknown setting tag");
+  rm_page_free(p);
+
+  /* 2) Second SceneInfo block with only tag 5 must not downgrade earlier tag 7.
+   */
+  b.count = RM_HEADER_LENGTH;
+  rm_buf s1 = {0}, c1 = {0}, s2 = {0}, p2 = {0};
+  rm_write_f64(&c1, 1620.0);
+  rm_write_f64(&c1, 2160.0);
+  rm_write_block(&s1, 7, c1.bytes, c1.count);
+  rm_write_top_block(&b, 13, 1, 1, s1.bytes, s1.count);
+  rm_write_u32(&p2, 1404);
+  rm_write_u32(&p2, 1872);
+  rm_write_block(&s2, 5, p2.bytes, p2.count);
+  rm_write_top_block(&b, 13, 1, 1, s2.bytes, s2.count);
+  p = parse(b.bytes, b.count);
+  RM_CHECK(p && p->has_paper_size && p->paper_size.width == 1620.0,
+           "later SceneInfo tag 5 does not downgrade earlier tag 7 canvas");
+  rm_page_free(p);
+
+  rm_buf_free(&b);
+  rm_buf_free(&list);
+  rm_buf_free(&inner);
+  rm_buf_free(&items);
+  rm_buf_free(&styles);
+  rm_buf_free(&style_list);
+  rm_buf_free(&both);
+  rm_buf_free(&root);
+  rm_buf_free(&pos);
+  rm_buf_free(&row);
+  rm_buf_free(&val);
+  rm_buf_free(&settings);
+  rm_buf_free(&unknown);
+  rm_buf_free(&s1);
+  rm_buf_free(&c1);
+  rm_buf_free(&s2);
+  rm_buf_free(&p2);
+}
+
+static void zero_item_id_does_not_hijack_head_of_chain(void) {
+  rm_buf b;
+  start_page(&b);
+  append_ordered_stroke(&b, 200, 0, 0);
+  /* Item with id {0,0} and left {1,200} must stay after {1,200}. */
+  rm_buf value = {0}, points = {0}, line = {0};
+  rm_buf_append_byte(&value, 0x03);
+  rm_write_tag(&value, 1, RM_TAG_BYTE4);
+  rm_write_u32(&value, RM_TOOL_FINELINER_2);
+  rm_write_tag(&value, 2, RM_TAG_BYTE4);
+  rm_write_u32(&value, 0);
+  rm_write_tag(&value, 3, RM_TAG_BYTE8);
+  rm_write_f64(&value, 1);
+  rm_write_tag(&value, 4, RM_TAG_BYTE4);
+  rm_write_f32(&value, 0);
+  rm_write_block(&value, 5, points.bytes, points.count);
+  rm_write_id(&line, 1, LAYER);
+  rm_write_id(&line, 2, RM_CRDT_NONE);
+  rm_write_id(&line, 3, rm_crdt_make(1, 200));
+  rm_write_id(&line, 4, RM_CRDT_NONE);
+  rm_write_tag(&line, 5, RM_TAG_BYTE4);
+  rm_write_u32(&line, 0);
+  rm_write_block(&line, 6, value.bytes, value.count);
+  rm_write_top_block(&b, 5, 2, 2, line.bytes, line.count);
+
+  rm_page* p = parse(b.bytes, b.count);
+  RM_CHECK(p && p->stroke_count == 2 && p->strokes[0].id.counter == 200 &&
+               p->strokes[1].id.counter == 0,
+           "item with id {0,0} does not precede head items");
+  rm_page_free(p);
+  rm_buf_free(&b);
+  rm_buf_free(&value);
+  rm_buf_free(&points);
+  rm_buf_free(&line);
+}
+
+static void append_attachment_for_key(rm_buf* b, const uint8_t key[16],
+                                      const char* filename) {
+  rm_buf row = {0}, name = {0}, rows = {0}, map = {0};
+  rm_buf_append(&row, key, 16);
+  rm_write_string(&name, filename);
+  rm_write_stamped_block(&row, 1, rm_crdt_make(1, 10), name.bytes, name.count);
+  rm_write_varuint(&rows, 1);
+  rm_write_block(&rows, 0, row.bytes, row.count);
+  rm_write_block(&map, 1, rows.bytes, rows.count);
+  rm_write_top_block(b, 14, 1, 1, map.bytes, map.count);
+  rm_buf_free(&map);
+  rm_buf_free(&rows);
+  rm_buf_free(&name);
+  rm_buf_free(&row);
+}
+
+static void a2_image_quad_and_bounds_timestamp_and_move_id_edge_cases(void) {
+  uint8_t img_key[16] = {9, 9};
+  rm_buf verts = {0};
+  rm_write_varuint(&verts, 16);
+  for (int i = 0; i < 4; ++i) {
+    rm_write_f32(&verts, (i == 1 || i == 2) ? 10.0f : 0.0f);
+    rm_write_f32(&verts, (i >= 2) ? 10.0f : 0.0f);
+    rm_write_f32(&verts, (i == 1 || i == 2) ? 1.0f : 0.0f);
+    rm_write_f32(&verts, (i >= 2) ? 1.0f : 0.0f);
+  }
+
+  /* Four corners suffice without an index list. An explicit list must
+   * describe the two triangles the tablet draws. */
+  const uint32_t bad_quads[4][6] = {
+      {0, 0, 0, 0, 0, 0},
+      {0, 1, 2, 0, 1, 2},
+      {0, 1, 2, 0, 1, 3},
+      {0, 1, 2, 2, 3, 4},
+  };
+  for (int mode = -1; mode < 4; ++mode) {
+    rm_buf b, val = {0}, img = {0};
+    start_page(&b);
+    append_layer(&b);
+    append_attachment_for_key(&b, img_key, "img.png");
+    rm_buf_append_byte(&val, 0x07);
+    rm_write_block(&val, 1, img_key, sizeof img_key);
+    rm_write_block(&val, 3, verts.bytes, verts.count);
+    if (mode >= 0) {
+      rm_buf idx = {0};
+      rm_write_varuint(&idx, 6);
+      for (int q = 0; q < 6; ++q) rm_write_u32(&idx, bad_quads[mode][q]);
+      rm_write_block(&val, 4, idx.bytes, idx.count);
+      rm_buf_free(&idx);
+    }
+    rm_write_id(&img, 1, LAYER);
+    rm_write_id(&img, 2, rm_crdt_make(1, 50));
+    rm_write_id(&img, 3, RM_CRDT_NONE);
+    rm_write_id(&img, 4, RM_CRDT_NONE);
+    rm_write_tag(&img, 5, RM_TAG_BYTE4);
+    rm_write_u32(&img, 0);
+    rm_write_block(&img, 6, val.bytes, val.count);
+    rm_write_top_block(&b, 15, 2, 2, img.bytes, img.count);
+
+    rm_page* p = parse(b.bytes, b.count);
+    RM_CHECK(p && p->skipped_blocks == (size_t)(mode >= 0) &&
+                 p->image_count == (size_t)(mode < 0),
+             "image mode=%d has the expected placement", mode);
+    rm_page_free(p);
+    rm_edit_session* s = nullptr;
+    RM_CHECK(rm_edit_open(b.bytes, b.count, &s, nullptr) ==
+                 (mode < 0 ? RM_OK : RM_ERR_INCOMPLETE_PAGE),
+             "rm_edit_open agrees with image placement for mode=%d", mode);
+    rm_edit_close(s);
+    rm_buf_free(&img);
+    rm_buf_free(&val);
+    rm_buf_free(&b);
+  }
+
+  /* 2) Live 0x0F with overflowing 10-byte tag 2 boundsTimestamp followed by
+   * canonical quad + complete tag 5 moveId fails and moveId is not checked
+   * (R244), while omitted tag 2 with truncated vs complete tag 5 parses (R147).
+   */
+  {
+    rm_buf idx = {0};
+    rm_write_varuint(&idx, 6);
+    const uint32_t quad[6] = {0, 1, 2, 2, 3, 0};
+    for (int q = 0; q < 6; ++q) rm_write_u32(&idx, quad[q]);
+
+    rm_buf b, val = {0}, img = {0};
+    start_page(&b);
+    append_layer(&b);
+    append_attachment_for_key(&b, img_key, "img.png");
+    rm_buf_append_byte(&val, 0x07);
+    rm_write_block(&val, 1, img_key, sizeof img_key);
+    /* Malformed present tag 2 boundsTimestamp: overflowing 10-byte counter. */
+    rm_write_tag(&val, 2, RM_TAG_ID);
+    rm_buf_append_byte(&val, 1);
+    const uint8_t over10[10] = {0x80, 0x80, 0x80, 0x80, 0x80,
+                                0x80, 0x80, 0x80, 0x80, 0x80};
+    rm_buf_append(&val, over10, sizeof over10);
+    rm_write_block(&val, 3, verts.bytes, verts.count);
+    rm_write_block(&val, 4, idx.bytes, idx.count);
+    rm_write_id(&val, 5, rm_crdt_make(1, 77)); /* moveId */
+    rm_write_id(&img, 1, LAYER);
+    rm_write_id(&img, 2, rm_crdt_make(1, 50));
+    rm_write_id(&img, 3, RM_CRDT_NONE);
+    rm_write_id(&img, 4, RM_CRDT_NONE);
+    rm_write_tag(&img, 5, RM_TAG_BYTE4);
+    rm_write_u32(&img, 0);
+    rm_write_block(&img, 6, val.bytes, val.count);
+    rm_write_top_block(&b, 15, 2, 2, img.bytes, img.count);
+
+    rm_page* p = parse(b.bytes, b.count);
+    RM_CHECK(p && p->skipped_blocks == 1 && p->image_count == 0,
+             "malformed tag 2 boundsTimestamp is counted skipped");
+    rm_page_free(p);
+    rm_edit_session* s = nullptr;
+    RM_CHECK(
+        rm_edit_open(b.bytes, b.count, &s, nullptr) == RM_ERR_INCOMPLETE_PAGE,
+        "rm_edit_open rejects image with bad boundsTimestamp");
+    rm_item_id* hl_ids = nullptr;
+    size_t hl_count = 0;
+    RM_CHECK(rm_highlighter_items(b.bytes, b.count, &hl_ids, &hl_count,
+                                  nullptr) == RM_ERR_INCOMPLETE_PAGE &&
+                 hl_ids == nullptr && hl_count == 0,
+             "rm_highlighter_items rejects image with bad boundsTimestamp");
+    rm_buf_free(&b);
+    rm_buf_free(&val);
+    rm_buf_free(&img);
+
+    /* Omitted tag 2 control with truncated vs complete tag 5 moveId (R147). */
+    for (int trunc_move = 0; trunc_move < 2; ++trunc_move) {
+      start_page(&b);
+      append_layer(&b);
+      append_attachment_for_key(&b, img_key, "img.png");
+      val.count = 0;
+      img.count = 0;
+      rm_buf_append_byte(&val, 0x07);
+      rm_write_block(&val, 1, img_key, sizeof img_key);
+      rm_write_block(&val, 3, verts.bytes, verts.count);
+      rm_write_block(&val, 4, idx.bytes, idx.count);
+      if (trunc_move) {
+        const uint8_t cut_move[] = {0x5F, 1};
+        rm_buf_append(&val, cut_move, sizeof cut_move);
+      } else {
+        rm_write_id(&val, 5, rm_crdt_make(1, 88));
+      }
+      rm_write_id(&img, 1, LAYER);
+      rm_write_id(&img, 2, rm_crdt_make(1, 50));
+      rm_write_id(&img, 3, RM_CRDT_NONE);
+      rm_write_id(&img, 4, RM_CRDT_NONE);
+      rm_write_tag(&img, 5, RM_TAG_BYTE4);
+      rm_write_u32(&img, 0);
+      rm_write_block(&img, 6, val.bytes, val.count);
+      rm_write_top_block(&b, 15, 2, 2, img.bytes, img.count);
+
+      rm_page* cp = parse(b.bytes, b.count);
+      RM_CHECK(cp && cp->skipped_blocks == 0 && cp->image_count == 1,
+               "omitted tag 2 image control (trunc_move=%d) parses",
+               trunc_move);
+      rm_page_free(cp);
+      rm_edit_session* cs = nullptr;
+      RM_CHECK(rm_edit_open(b.bytes, b.count, &cs, nullptr) == RM_OK, "open");
+      rm_draft_point pt = rm_draft_point_make(0, 0);
+      rm_draft_stroke st =
+          rm_draft_stroke_make(RM_TOOL_FINELINER_2, RM_COLOR_BLACK, &pt, 1);
+      RM_CHECK(rm_edit_insert_stroke(cs, rm_item_id_of(LAYER),
+                                     (rm_item_id){1, 88}, (rm_item_id){0},
+                                     (rm_item_id){0}, &st, nullptr) ==
+                   (trunc_move ? RM_OK : RM_ERR_INVALID_ARGUMENT),
+               "image tag 5 moveId trunc=%d collision behavior", trunc_move);
+      RM_CHECK(rm_edit_insert_stroke(cs, rm_item_id_of(LAYER),
+                                     (rm_item_id){1, 95}, (rm_item_id){0},
+                                     (rm_item_id){0}, &st, nullptr) == RM_OK,
+               "fresh stroke succeeds on omitted tag 2 image");
+      rm_edit_close(cs);
+      rm_buf_free(&b);
+      rm_buf_free(&val);
+      rm_buf_free(&img);
+    }
+    rm_buf_free(&idx);
+  }
+  rm_buf_free(&verts);
+}
+
+static void append_plain_text_row(rm_buf* list, uint64_t id, uint64_t left,
+                                  uint32_t deleted, const char* text,
+                                  bool omit_tag6) {
+  rm_buf row = {0}, val = {0};
+  rm_write_id(&row, 2, rm_crdt_make(1, id));
+  rm_write_id(&row, 3, left ? rm_crdt_make(1, left) : RM_CRDT_NONE);
+  rm_write_id(&row, 4, RM_CRDT_NONE);
+  rm_write_tag(&row, 5, RM_TAG_BYTE4);
+  rm_write_u32(&row, deleted);
+  if (!omit_tag6) {
+    rm_write_string(&val, text);
+    rm_write_block(&row, 6, val.bytes, val.count);
+  }
+  rm_write_block(list, 0, row.bytes, row.count);
+  rm_buf_free(&val);
+  rm_buf_free(&row);
+}
+
+static void
+a2_root_text_envelope_inactive_lists_deleted_tag6_and_styles_recovery(void) {
+  rm_draft_point pt = rm_draft_point_make(0, 0);
+  rm_draft_stroke ins =
+      rm_draft_stroke_make(RM_TOOL_FINELINER_2, RM_COLOR_BLACK, &pt, 1);
+
+  /* (a) & (b): short inner tag 1 container wrapper in single & two-RootText
+   * page (R84, R9-1). */
+  {
+    rm_buf b, list = {0}, inner = {0}, items = {0}, root = {0}, pos = {0};
+    start_page(&b);
+    const record first_rec[] = {
+        {.id = {.counter = 10, .author = 1}, .text = "First"}};
+    append_root_text(&b, first_rec, 1, 936, NAN);
+
+    rm_write_varuint(&list, 1);
+    append_plain_text_row(&list, 30, 0, 0, "Bad", false);
+    rm_write_block(&inner, 1, list.bytes, list.count);
+    inner.bytes[inner.count - list.count - 4u] =
+        (uint8_t)(list.count + 20u); /* overlong inner tag 1 */
+    rm_write_block(&items, 1, inner.bytes, inner.count);
+    rm_write_id(&root, 1, RM_CRDT_NONE);
+    rm_write_block(&root, 2, items.bytes, items.count);
+    rm_write_f64(&pos, -468);
+    rm_write_f64(&pos, 234);
+    rm_write_block(&root, 3, pos.bytes, pos.count);
+    rm_write_top_block(&b, 0x07, 1, 1, root.bytes, root.count);
+
+    rm_page* p = parse(b.bytes, b.count);
+    RM_CHECK(p && p->skipped_blocks == 1 && p->has_text,
+             "overlong inner list on 2nd RootText keeps 1st layout & counts 1");
+    expect_lines(p, (const char* const[]){"First"}, 1, "kept first RootText");
+    rm_page_free(p);
+    rm_edit_session* s = nullptr;
+    RM_CHECK(
+        rm_edit_open(b.bytes, b.count, &s, nullptr) == RM_ERR_INCOMPLETE_PAGE,
+        "rm_edit_open reports incomplete page on overlong inner RootText");
+    rmi_edit_candidate cand = {0};
+    RM_CHECK(
+        rmi_edit_replace_text(b.bytes, b.count, 0, 0, "X", (rm_item_id){1, 50},
+                              &cand, nullptr) == RM_ERR_INCOMPLETE_PAGE,
+        "rmi_edit_replace_text reports incomplete page");
+    rm_buf bufs[] = {b, list, inner, items, root, pos};
+    for (size_t i = 0; i < sizeof bufs / sizeof *bufs; ++i)
+      rm_buf_free(&bufs[i]);
+  }
+
+  /* (c): overlong TAG_TEXT_SETTINGS, short 2-byte TAG_TEXT_SETTINGS length,
+   * and short 2-byte TAG_COLUMN_WIDTH payload (R148). */
+  for (int variant = 0; variant < 3; ++variant) {
+    rm_buf b, list = {0}, inner = {0}, items = {0}, root = {0}, pos = {0};
+    start_page(&b);
+    append_layer(&b);
+    rm_write_varuint(&list, 1);
+    append_plain_text_row(&list, 20, 0, 0, "Keep", false);
+    rm_write_block(&inner, 1, list.bytes, list.count);
+    rm_write_block(&items, 1, inner.bytes, inner.count);
+    rm_write_id(&root, 1, RM_CRDT_NONE);
+    rm_write_block(&root, 2, items.bytes, items.count);
+    rm_write_f64(&pos, -468);
+    rm_write_f64(&pos, 234);
+    rm_write_block(&root, 3, pos.bytes, pos.count);
+    rm_write_tag(&root, 4, RM_TAG_BYTE4);
+    if (variant == 2) {
+      rm_buf_append(&root, (const uint8_t[]){0x01, 0x02}, 2);
+    } else {
+      rm_write_f32(&root, 936.0f);
+      rm_write_tag(&root, 5, RM_TAG_LENGTH4);
+      if (variant == 0) {
+        rm_write_u32(&root, 50); /* overlong TAG_TEXT_SETTINGS */
+        rm_buf_append(&root, (const uint8_t[]){1, 2, 3}, 3);
+      } else {
+        rm_buf_append(&root, (const uint8_t[]){5, 0}, 2); /* 2-byte len */
+      }
+    }
+    rm_write_top_block(&b, 0x07, 1, 1, root.bytes, root.count);
+
+    rm_page* p = parse(b.bytes, b.count);
+    RM_CHECK(p && p->skipped_blocks == 0 && p->has_text,
+             "short/overlong trailing settings variant=%d keeps text", variant);
+    expect_lines(p, (const char* const[]){"Keep"}, 1, "variant text");
+    rm_page_free(p);
+    rm_edit_session* s = nullptr;
+    RM_CHECK(rm_edit_open(b.bytes, b.count, &s, nullptr) == RM_OK, "open");
+    RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 20},
+                                   (rm_item_id){0}, (rm_item_id){0}, &ins,
+                                   nullptr) == RM_ERR_INVALID_ARGUMENT,
+             "preceding row id collides in variant=%d", variant);
+    RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 90},
+                                   (rm_item_id){0}, (rm_item_id){0}, &ins,
+                                   nullptr) == RM_OK,
+             "fresh stroke succeeds in variant=%d", variant);
+    rm_edit_close(s);
+    rm_buf bufs[] = {b, list, inner, items, root, pos};
+    for (size_t i = 0; i < sizeof bufs / sizeof *bufs; ++i)
+      rm_buf_free(&bufs[i]);
+  }
+
+  /* (d): valid items + BYTE1 ext + overlong inactive container + inactive
+   * list with malformed row 1 (id/left/right + truncated str) followed by
+   * valid row 2, plus direct collision on first valid row of inactive list
+   * (R118, R124, R131, R138, R208). */
+  {
+    rm_buf b, l1 = {0}, in1 = {0}, it1 = {0}, l2 = {0}, in2 = {0}, it2 = {0},
+              root = {0}, pos = {0};
+    start_page(&b);
+    append_layer(&b);
+    rm_write_varuint(&l1, 1);
+    append_plain_text_row(&l1, 10, 0, 0, "Act", false);
+    rm_write_block(&in1, 1, l1.bytes, l1.count);
+    rm_write_block(&it1, 1, in1.bytes, in1.count);
+
+    rm_write_f64(&pos, -468);
+    rm_write_f64(&pos, 234);
+
+    rm_write_id(&root, 1, RM_CRDT_NONE);
+    rm_write_block(&root, 2, it1.bytes, it1.count);
+    rm_write_block(&root, 3, pos.bytes, pos.count);
+    rm_write_tag(&root, 9, RM_TAG_BYTE1);
+    rm_buf_append_byte(&root, 1);
+
+    /* Inactive TAG_TEXT_ITEMS #1: overlong inner container. */
+    rm_buf bad_in = {0}, bad_it = {0}, bad_c = {0};
+    rm_buf_append_byte(&bad_in, 1);
+    rm_write_tag(&bad_in, 1, RM_TAG_LENGTH4);
+    rm_write_u32(&bad_in, 50);
+    rm_write_block(&bad_it, 1, bad_in.bytes, bad_in.count);
+    rm_write_block(&bad_c, 1, bad_it.bytes, bad_it.count);
+    rm_write_block(&root, 2, bad_c.bytes, bad_c.count);
+    rm_buf_free(&bad_c);
+    rm_buf_free(&bad_it);
+    rm_buf_free(&bad_in);
+
+    /* Inactive TAG_TEXT_ITEMS #2: row 1 malformed after preamble, row 2 valid,
+     * row 3 inactive deleted without tag 6 (R226). */
+    rm_write_varuint(&l2, 3);
+    rm_buf bad_r = {0};
+    rm_write_id(&bad_r, 2, rm_crdt_make(1, 200));
+    rm_write_id(&bad_r, 3, rm_crdt_make(1, 201));
+    rm_write_id(&bad_r, 4, rm_crdt_make(1, 202));
+    rm_write_tag(&bad_r, 5, RM_TAG_BYTE4);
+    rm_write_u32(&bad_r, 0);
+    const uint8_t unfinished_str[] = {0x80};
+    rm_write_block(&bad_r, 6, unfinished_str, sizeof unfinished_str);
+    rm_write_block(&l2, 0, bad_r.bytes, bad_r.count);
+    rm_buf_free(&bad_r);
+    append_plain_text_row(&l2, 210, 0, 0, "Sec", false);
+    append_plain_text_row(&l2, 220, 0, 3, "", true); /* id 1:220, span 3 */
+    rm_write_block(&in2, 1, l2.bytes, l2.count);
+    rm_write_block(&it2, 1, in2.bytes, in2.count);
+    rm_write_block(&root, 2, it2.bytes, it2.count);
+    rm_write_top_block(&b, 0x07, 1, 1, root.bytes, root.count);
+
+    rm_edit_session* s = nullptr;
+    RM_CHECK(rm_edit_open(b.bytes, b.count, &s, nullptr) == RM_OK, "open");
+    const uint64_t collide_ids[] = {10, 200, 201, 202, 210, 222};
+    for (size_t i = 0; i < sizeof collide_ids / sizeof *collide_ids; ++i) {
+      RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER),
+                                     (rm_item_id){1, collide_ids[i]},
+                                     (rm_item_id){0}, (rm_item_id){0}, &ins,
+                                     nullptr) == RM_ERR_INVALID_ARGUMENT,
+               "inactive/preamble ID (1, %llu) collides",
+               (unsigned long long)collide_ids[i]);
+    }
+    RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER),
+                                   (rm_item_id){1, 223}, (rm_item_id){0},
+                                   (rm_item_id){0}, &ins, nullptr) == RM_OK,
+             "fresh ID (1, 223) past span-3 no-tag6 row succeeds");
+    rm_edit_close(s);
+
+    /* Inactive list whose VERY FIRST row is valid (R208). */
+    rm_buf r2 = {0}, lfirst = {0}, in_first = {0}, it_first = {0};
+    rm_write_id(&r2, 1, RM_CRDT_NONE);
+    rm_write_block(&r2, 2, it1.bytes, it1.count);
+    rm_write_block(&r2, 3, pos.bytes, pos.count);
+    rm_write_tag(&r2, 9, RM_TAG_BYTE1);
+    rm_buf_append_byte(&r2, 1);
+    rm_write_varuint(&lfirst, 1);
+    append_plain_text_row(&lfirst, 300, 0, 0, "Fst", false);
+    rm_write_block(&in_first, 1, lfirst.bytes, lfirst.count);
+    rm_write_block(&it_first, 1, in_first.bytes, in_first.count);
+    rm_write_block(&r2, 2, it_first.bytes, it_first.count);
+    b.count = RM_HEADER_LENGTH;
+    append_layer(&b);
+    rm_write_top_block(&b, 0x07, 1, 1, r2.bytes, r2.count);
+    RM_CHECK(rm_edit_open(b.bytes, b.count, &s, nullptr) == RM_OK, "open r208");
+    RM_CHECK(rm_edit_insert_stroke(
+                 s, rm_item_id_of(LAYER), (rm_item_id){1, 300}, (rm_item_id){0},
+                 (rm_item_id){0}, &ins, nullptr) == RM_ERR_INVALID_ARGUMENT,
+             "first valid row of inactive list (1, 300) collides (R208)");
+    rm_edit_close(s);
+    rm_buf_free(&it_first);
+    rm_buf_free(&in_first);
+    rm_buf_free(&lfirst);
+    rm_buf_free(&r2);
+    rm_buf bufs[] = {b, l1, in1, it1, l2, in2, it2, root, pos};
+    for (size_t i = 0; i < sizeof bufs / sizeof *bufs; ++i)
+      rm_buf_free(&bufs[i]);
+  }
+
+  /* (e): TAG_TEXT_ITEMS with two items children & two rows lists (R150,
+   * R157). */
+  {
+    rm_buf b, l1 = {0}, l2 = {0}, l3 = {0}, inner1 = {0}, items = {0},
+              root = {0}, pos = {0};
+    start_page(&b);
+    append_layer(&b);
+    rm_write_varuint(&l1, 1);
+    append_plain_text_row(&l1, 10, 0, 0, "One", false);
+    rm_write_varuint(&l2, 1);
+    append_plain_text_row(&l2, 20, 0, 0, "Two", false);
+    rm_write_varuint(&l3, 1);
+    append_plain_text_row(&l3, 30, 0, 0, "Three", false);
+    rm_write_block(&inner1, 1, l1.bytes, l1.count);
+    rm_write_block(&inner1, 1, l2.bytes, l2.count); /* second rows list */
+    rm_write_block(&items, 1, inner1.bytes, inner1.count);
+    rm_buf inner2 = {0};
+    rm_write_block(&inner2, 1, l3.bytes, l3.count);
+    rm_write_block(&items, 1, inner2.bytes, inner2.count); /* second items */
+    rm_buf_free(&inner2);
+    rm_write_id(&root, 1, RM_CRDT_NONE);
+    rm_write_block(&root, 2, items.bytes, items.count);
+    rm_write_f64(&pos, -468);
+    rm_write_f64(&pos, 234);
+    rm_write_block(&root, 3, pos.bytes, pos.count);
+    rm_write_top_block(&b, 0x07, 1, 1, root.bytes, root.count);
+
+    rm_edit_session* s = nullptr;
+    RM_CHECK(rm_edit_open(b.bytes, b.count, &s, nullptr) == RM_OK, "open");
+    RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 20},
+                                   (rm_item_id){0}, (rm_item_id){0}, &ins,
+                                   nullptr) == RM_ERR_INVALID_ARGUMENT,
+             "second rows list id (1,20) collides (R150)");
+    RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 30},
+                                   (rm_item_id){0}, (rm_item_id){0}, &ins,
+                                   nullptr) == RM_ERR_INVALID_ARGUMENT,
+             "second items child id (1,30) collides (R157)");
+    RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 90},
+                                   (rm_item_id){0}, (rm_item_id){0}, &ins,
+                                   nullptr) == RM_OK,
+             "fresh id succeeds on multi-list RootText");
+    rm_edit_close(s);
+    rm_buf bufs[] = {b, l1, l2, l3, inner1, items, root, pos};
+    for (size_t i = 0; i < sizeof bufs / sizeof *bufs; ++i)
+      rm_buf_free(&bufs[i]);
+  }
+
+  /* RM_ROW_SHORT_PREFIX active Row 2 + deleted id 1:100 span 3 no-tag6 (R219,
+   * R226). */
+  {
+    rm_buf b, l = {0}, inner = {0}, items = {0}, root = {0}, pos = {0};
+    start_page(&b);
+    append_layer(&b);
+    rm_write_varuint(&l, 3);
+    append_plain_text_row(&l, 10, 0, 0, "Hi", false);
+    append_plain_text_row(&l, 100, 0, 3, "", true); /* span 3 active */
+    rm_write_tag(&l, 0, RM_TAG_LENGTH4);
+    rm_buf_append(&l, (const uint8_t[]){0x05, 0x00}, 2); /* truncated prefix */
+    rm_write_block(&inner, 1, l.bytes, l.count);
+    rm_write_block(&items, 1, inner.bytes, inner.count);
+    rm_write_id(&root, 1, RM_CRDT_NONE);
+    rm_write_block(&root, 2, items.bytes, items.count);
+    rm_write_f64(&pos, -468);
+    rm_write_f64(&pos, 234);
+    rm_write_block(&root, 3, pos.bytes, pos.count);
+    rm_write_top_block(&b, 0x07, 1, 1, root.bytes, root.count);
+
+    rm_page* p = parse(b.bytes, b.count);
+    RM_CHECK(p && p->skipped_blocks == 0 && p->has_text,
+             "short row prefix parses with skipped_blocks == 0");
+    rm_page_free(p);
+    rm_edit_session* s = nullptr;
+    RM_CHECK(rm_edit_open(b.bytes, b.count, &s, nullptr) == RM_OK, "open");
+    RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 10},
+                                   (rm_item_id){0}, (rm_item_id){0}, &ins,
+                                   nullptr) == RM_ERR_INVALID_ARGUMENT,
+             "row 1 id reserved before short prefix");
+    RM_CHECK(rm_edit_insert_stroke(
+                 s, rm_item_id_of(LAYER), (rm_item_id){1, 102}, (rm_item_id){0},
+                 (rm_item_id){0}, &ins, nullptr) == RM_ERR_INVALID_ARGUMENT,
+             "active no-tag6 deleted span 3 collides at (1, 102)");
+    RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER),
+                                   (rm_item_id){1, 103}, (rm_item_id){0},
+                                   (rm_item_id){0}, &ins, nullptr) == RM_OK,
+             "unrelated fresh stroke succeeds");
+    RM_CHECK(rm_edit_replace_text(s, 0, 0, "!", (rm_item_id){1, 200},
+                                  nullptr) == RM_ERR_MALFORMED_PAGE,
+             "rm_edit_replace_text refuses short-prefix rows atomically");
+    rm_edit_close(s);
+    rm_buf bufs[] = {b, l, inner, items, root, pos};
+    for (size_t i = 0; i < sizeof bufs / sizeof *bufs; ++i)
+      rm_buf_free(&bufs[i]);
+  }
+
+  /* Styles recovery (R227, R231, R236, R242, R243, R247, R252). */
+  {
+    /* (a) bounded rows list with unfinished count varuint followed by reachable
+     * valid tag 2 styles (key/stamp). */
+    rm_buf b, l = {0}, in = {0}, items = {0}, st = {0}, sl = {0}, root = {0},
+              pos = {0};
+    start_page(&b);
+    append_layer(&b);
+    rm_buf_append_byte(&l, 0x80); /* unfinished count varuint */
+    rm_write_block(&in, 1, l.bytes, l.count);
+    rm_write_block(&items, 1, in.bytes, in.count);
+    rm_write_varuint(&st, 1);
+    rm_write_bare_id(&st, rm_crdt_make(1, 41));
+    rm_write_id(&st, 1, rm_crdt_make(1, 42));
+    const uint8_t fmt_h[] = {0x11, 0x02};
+    rm_write_block(&st, 2, fmt_h, sizeof fmt_h);
+    rm_write_block(&sl, 1, st.bytes, st.count);
+    rm_write_block(&items, 2, sl.bytes, sl.count);
+    rm_write_id(&root, 1, RM_CRDT_NONE);
+    rm_write_block(&root, 2, items.bytes, items.count);
+    rm_write_f64(&pos, -468);
+    rm_write_f64(&pos, 234);
+    rm_write_block(&root, 3, pos.bytes, pos.count);
+    rm_write_top_block(&b, 0x07, 1, 1, root.bytes, root.count);
+
+    rm_edit_session* s = nullptr;
+    RM_CHECK(rm_edit_open(b.bytes, b.count, &s, nullptr) == RM_OK, "open (a)");
+    RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 42},
+                                   (rm_item_id){0}, (rm_item_id){0}, &ins,
+                                   nullptr) == RM_ERR_INVALID_ARGUMENT,
+             "reachable styles stamp past unfinished rows count collides");
+    RM_CHECK(rm_edit_replace_text(s, 0, 0, "A", (rm_item_id){1, 90}, nullptr) ==
+                 RM_ERR_MALFORMED_PAGE,
+             "replace_text refuses unfinished rows count");
+    rm_edit_close(s);
+    rm_buf bufs[] = {b, l, in, items, st, sl, root, pos};
+    for (size_t i = 0; i < sizeof bufs / sizeof *bufs; ++i)
+      rm_buf_free(&bufs[i]);
+  }
+
+  /* (b) earlier bounded container with unfinished styles count superseded by a
+   * later valid TAG_TEXT_ITEMS container (R231). */
+  {
+    rm_buf b, l1 = {0}, in1 = {0}, it1 = {0}, sl1 = {0}, l2 = {0}, in2 = {0},
+              it2 = {0}, sl2 = {0}, root = {0}, pos = {0};
+    start_page(&b);
+    append_layer(&b);
+    rm_write_varuint(&l1, 1);
+    append_plain_text_row(&l1, 10, 0, 0, "Old", false);
+    rm_write_block(&in1, 1, l1.bytes, l1.count);
+    rm_write_block(&it1, 1, in1.bytes, in1.count);
+    const uint8_t bad_sc = 0x80;
+    rm_write_block(&sl1, 1, &bad_sc, 1);
+    rm_write_block(&it1, 2, sl1.bytes, sl1.count);
+
+    rm_write_varuint(&l2, 1);
+    append_plain_text_row(&l2, 20, 0, 0, "New", false);
+    rm_write_block(&in2, 1, l2.bytes, l2.count);
+    rm_write_block(&it2, 1, in2.bytes, in2.count);
+    const uint8_t zero_sc = 0x00;
+    rm_write_block(&sl2, 1, &zero_sc, 1);
+    rm_write_block(&it2, 2, sl2.bytes, sl2.count);
+
+    rm_write_id(&root, 1, RM_CRDT_NONE);
+    rm_write_block(&root, 2, it1.bytes, it1.count);
+    rm_write_block(&root, 2, it2.bytes, it2.count);
+    rm_write_f64(&pos, -468);
+    rm_write_f64(&pos, 234);
+    rm_write_block(&root, 3, pos.bytes, pos.count);
+    rm_write_top_block(&b, 0x07, 1, 1, root.bytes, root.count);
+
+    rm_edit_session* s = nullptr;
+    RM_CHECK(rm_edit_open(b.bytes, b.count, &s, nullptr) == RM_OK, "open (b)");
+    RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 20},
+                                   (rm_item_id){0}, (rm_item_id){0}, &ins,
+                                   nullptr) == RM_ERR_INVALID_ARGUMENT,
+             "later valid container row id collides");
+    RM_CHECK(rm_edit_replace_text(s, 3, 0, "!", (rm_item_id){1, 80}, nullptr) ==
+                 RM_OK,
+             "appending to later published container succeeds");
+    size_t esz = 0;
+    const uint8_t* eb = rm_edit_bytes(s, &esz);
+    rm_page* ep = parse(eb, esz);
+    expect_lines(ep, (const char* const[]){"New!"}, 1, "superseded appended");
+    RM_CHECK(has_bytes(eb, esz, it1.bytes, it1.count),
+             "superseded damaged container kept verbatim");
+    rm_page_free(ep);
+    rm_edit_close(s);
+    rm_buf bufs[] = {b, l1, in1, it1, sl1, l2, in2, it2, sl2, root, pos};
+    for (size_t i = 0; i < sizeof bufs / sizeof *bufs; ++i)
+      rm_buf_free(&bufs[i]);
+  }
+
+  /* (c) single effective TAG_TEXT_ITEMS whose styles list has unfinished count
+   * refuses newline replacement with RM_ERR_MALFORMED_PAGE (R227). */
+  {
+    rm_buf b, l = {0}, in = {0}, it = {0}, sl = {0}, root = {0}, pos = {0};
+    start_page(&b);
+    rm_write_varuint(&l, 1);
+    append_plain_text_row(&l, 10, 0, 0, "A\nB", false);
+    rm_write_block(&in, 1, l.bytes, l.count);
+    rm_write_block(&it, 1, in.bytes, in.count);
+    const uint8_t bad_sc = 0x80;
+    rm_write_block(&sl, 1, &bad_sc, 1);
+    rm_write_block(&it, 2, sl.bytes, sl.count);
+    rm_write_id(&root, 1, RM_CRDT_NONE);
+    rm_write_block(&root, 2, it.bytes, it.count);
+    rm_write_f64(&pos, -468);
+    rm_write_f64(&pos, 234);
+    rm_write_block(&root, 3, pos.bytes, pos.count);
+    rm_write_top_block(&b, 0x07, 1, 1, root.bytes, root.count);
+
+    rm_edit_session* s = nullptr;
+    RM_CHECK(rm_edit_open(b.bytes, b.count, &s, nullptr) == RM_OK, "open (c)");
+    RM_CHECK(rm_edit_replace_text(s, 1, 1, "\n", (rm_item_id){1, 50},
+                                  nullptr) == RM_ERR_MALFORMED_PAGE,
+             "newline replacement refuses unfinished styles count");
+    rm_edit_close(s);
+    rm_buf bufs[] = {b, l, in, it, sl, root, pos};
+    for (size_t i = 0; i < sizeof bufs / sizeof *bufs; ++i)
+      rm_buf_free(&bufs[i]);
+  }
+
+  /* (d)(1)-(4): valid heading entry 0 before damaged entry 1, plus outer
+   * TAG_TEXT_SETTINGS width_stamp 1152.0 (R236, R242, R243, R247, R252). */
+  for (int sub = 1; sub <= 4; ++sub) {
+    rm_buf b, l = {0}, in = {0}, it = {0}, st = {0}, sl = {0}, root = {0},
+              pos = {0}, settings = {0};
+    start_page(&b);
+    append_layer(&b);
+    rm_write_varuint(&l, 1);
+    append_plain_text_row(&l, 10, 0, 0, "A\nB", false); /* A=10,\n=11,B=12 */
+    rm_write_block(&in, 1, l.bytes, l.count);
+    rm_write_block(&it, 1, in.bytes, in.count);
+
+    rm_write_varuint(&st, sub >= 3 ? 3 : 2);
+    /* Entry 0: valid heading 2 on para 0 (0:0 or key 1:11 for \n). We key on
+     * 1:11? Wait: put valid heading on 0:0 (para 0) with stamp 1:30, then entry
+     * 2 keyed to 1:11 if needed! */
+    rm_write_bare_id(&st, RM_CRDT_NONE);
+    rm_write_id(&st, 1, rm_crdt_make(1, 30));
+    const uint8_t fmt_h[] = {0x11, 0x02};
+    rm_write_block(&st, 2, fmt_h, sizeof fmt_h);
+
+    size_t tail_off = st.count;
+    if (sub == 1) {
+      rm_buf_append(&st, (const uint8_t[]){1, 0x80}, 2); /* incomplete key */
+    } else if (sub == 2) {
+      rm_write_bare_id(&st, rm_crdt_make(1, 40));
+      rm_write_tag(&st, 2, RM_TAG_LENGTH4);
+      rm_buf_append(&st, (const uint8_t[]){1, 0}, 2); /* short tag 2 len */
+    } else if (sub == 3) {
+      rm_write_bare_id(&st, rm_crdt_make(1, 40));
+      rm_write_tag(&st, 1, RM_TAG_ID);
+      rm_buf_append_byte(&st, 1);
+      const uint8_t o10[10] = {0x80, 0x80, 0x80, 0x80, 0x80,
+                               0x80, 0x80, 0x80, 0x80, 0x80};
+      rm_buf_append(&st, o10, sizeof o10);
+      rm_write_block(&st, 2, fmt_h, sizeof fmt_h);
+    } else {
+      rm_write_bare_id(&st, rm_crdt_make(1, 40));
+      rm_write_id(&st, 1, rm_crdt_make(1, 41));
+      const uint8_t bad_val[] = {0x11}; /* tag 1 BYTE1 missing value byte */
+      rm_write_block(&st, 2, bad_val, sizeof bad_val);
+    }
+    if (sub >= 3) {
+      /* Entry 2 keyed to '\n' (1, 11) that gets replaced — must NOT rewrite! */
+      rm_write_bare_id(&st, rm_crdt_make(1, 11));
+      rm_write_id(&st, 1, rm_crdt_make(1, 45));
+      const uint8_t fmt_b[] = {0x11, 0x03};
+      rm_write_block(&st, 2, fmt_b, sizeof fmt_b);
+    }
+    size_t tail_len = st.count - tail_off;
+
+    rm_write_block(&sl, 1, st.bytes, st.count);
+    rm_write_block(&it, 2, sl.bytes, sl.count);
+    rm_write_id(&root, 1, RM_CRDT_NONE);
+    rm_write_block(&root, 2, it.bytes, it.count);
+    rm_write_f64(&pos, -468);
+    rm_write_f64(&pos, 234);
+    rm_write_block(&root, 3, pos.bytes, pos.count);
+    rm_write_tag(&root, 4, RM_TAG_BYTE4);
+    rm_write_f32(&root, 936.0f);
+    rm_write_stamped_f32(&settings, 1, rm_crdt_make(1, 55), 1152.0f);
+    rm_write_block(&root, 5, settings.bytes, settings.count);
+    rm_write_top_block(&b, 0x07, 1, 1, root.bytes, root.count);
+
+    rm_page* p = parse(b.bytes, b.count);
+    RM_CHECK(
+        p && p->skipped_blocks == 0 && p->has_text &&
+            p->text.paragraph_count == 2 && p->text.paragraphs[0].has_format &&
+            p->text.paragraphs[0].format.raw == 2 &&
+            !p->text.paragraphs[1].has_format && p->text.column_width == 1152.0,
+        "style damage sub=%d retains entry 0 + publishes 1152.0", sub);
+    rm_page_free(p);
+
+    rm_edit_session* s = nullptr;
+    RM_CHECK(rm_edit_open(b.bytes, b.count, &s, nullptr) == RM_OK, "open sub");
+    RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 30},
+                                   (rm_item_id){0}, (rm_item_id){0}, &ins,
+                                   nullptr) == RM_ERR_INVALID_ARGUMENT,
+             "entry 0 stamp collides in sub=%d", sub);
+    RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 55},
+                                   (rm_item_id){0}, (rm_item_id){0}, &ins,
+                                   nullptr) == RM_ERR_INVALID_ARGUMENT,
+             "outer width_stamp (1, 55) collides in sub=%d", sub);
+    if (sub >= 2) {
+      RM_CHECK(
+          rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 40},
+                                (rm_item_id){0}, (rm_item_id){0}, &ins,
+                                nullptr) == RM_ERR_INVALID_ARGUMENT,
+          "entry 1 decoded key (1, 40) collides in sub=%d", sub);
+    }
+    RM_CHECK(rm_edit_insert_stroke(s, rm_item_id_of(LAYER), (rm_item_id){1, 90},
+                                   (rm_item_id){0}, (rm_item_id){0}, &ins,
+                                   nullptr) == RM_OK,
+             "fresh stroke succeeds in sub=%d", sub);
+    RM_CHECK(rm_edit_undo(s), "undo stroke");
+    RM_CHECK(
+        rm_edit_replace_text(s, 1, 1, "\n", (rm_item_id){1, 80}, nullptr) ==
+            RM_OK,
+        "newline replacement succeeds preserving partial style tail sub=%d",
+        sub);
+    size_t esz = 0;
+    const uint8_t* eb = rm_edit_bytes(s, &esz);
+    rm_page* ep = parse(eb, esz);
+    RM_CHECK(ep && ep->has_text && ep->text.paragraph_count == 2 &&
+                 ep->text.paragraphs[0].has_format &&
+                 ep->text.paragraphs[0].format.raw == 2 &&
+                 !ep->text.paragraphs[1].has_format,
+             "replaced sub=%d keeps entry 0 heading", sub);
+    RM_CHECK(has_bytes(eb, esz, st.bytes + tail_off, tail_len),
+             "partial style tail (and entry 2 key) preserved verbatim sub=%d",
+             sub);
+    rm_page_free(ep);
+    rm_edit_close(s);
+    rm_buf bufs[] = {b, l, in, it, st, sl, root, pos, settings};
+    for (size_t i = 0; i < sizeof bufs / sizeof *bufs; ++i)
+      rm_buf_free(&bufs[i]);
+  }
+}
+
 int main(void) {
+  glyph_range_edits_preserve_field_order();
+  edits_use_the_displayed_root();
+  edit_root_without_lists();
   repeated_node_fields_use_the_winning_stamp();
   stale_group_links_do_not_discard_sibling_order();
   scene_neighbours_inside_deleted_ranges();
@@ -1638,5 +3372,13 @@ int main(void) {
   a_text_list_that_runs_out_keeps_what_it_holds();
   a_text_record_that_fails_inside_costs_the_list();
   a_tree_node_field_past_its_block_keeps_what_came_before();
+  nonfinite_stroke_starting_length_is_kept_and_normalized();
+  deleted_scene_items_with_payload_stay_tombstones();
+  bare_image_key_starting_with_0x2c_and_oversized_key();
+  non_sentinel_end_id_stays_unresolved_when_missing();
+  nested_text_containers_and_settings_and_scene_info_preserve_data();
+  zero_item_id_does_not_hijack_head_of_chain();
+  a2_image_quad_and_bounds_timestamp_and_move_id_edge_cases();
+  a2_root_text_envelope_inactive_lists_deleted_tag6_and_styles_recovery();
   return rm_test_report("format_edges");
 }

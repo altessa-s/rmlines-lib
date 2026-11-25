@@ -33,15 +33,18 @@ typedef struct rm_draft_sheet {
   uint32_t screen_width;
   uint32_t screen_height;
   /* `tags 7` and `8` — the same size unrounded, and the one the format
-   * calls authoritative. */
+   * calls authoritative. Both must be finite and non-negative
+   * (`RM_ERR_INVALID_ARGUMENT` otherwise); `0.0` on either axis falls back to
+   * `(screen_width, screen_height)` on readback when both screen dimensions are
+   * positive (otherwise `has_paper_size == false`). */
   double canvas_width;
   double canvas_height;
 } rm_draft_sheet;
 
-/* The typed-text column: its width in the file's own units, and which of the
- * tablet's three settings that is — `tag 9` stores the setting, not the
- * width. The two have to agree; `rm_draft_column_of` is how a caller is kept
- * from inventing a fourth or pairing a width with the wrong setting. */
+/* The typed-text column: its width in the file's own units (non-negative;
+ * `0.0f` falls back to `setting`), and which layout setting that is (`0`
+ * Narrow, `1` Medium, `2` Wide, `4` Auto — `3` Reflow and values > 4 are
+ * refused with `RM_ERR_INVALID_ARGUMENT`). */
 typedef struct rm_draft_column {
   float width;
   uint8_t setting;
@@ -52,9 +55,10 @@ RM_API rm_draft_column rm_draft_column_of(rm_text_column column);
 
 /* One paragraph of the typed text. */
 typedef struct rm_draft_paragraph {
-  /* NUL-terminated UTF-8. Must not contain a newline: a paragraph is a
-   * paragraph, and the writer puts the newlines in. Ill-formed bytes are
-   * written as U+FFFD, by the Unicode "maximal subpart" rule. */
+  /* NUL-terminated UTF-8. Must not contain `'\n'`
+   * (`RM_ERR_INVALID_ARGUMENT`): a paragraph is a paragraph, and the writer
+   * puts the newlines in. Ill-formed bytes are written as U+FFFD, by the
+   * Unicode "maximal subpart" rule. */
   const char* text;
   /* The `tag 1` style value; absent writes no style record (plain body). */
   bool has_style;
@@ -86,24 +90,26 @@ RM_API rm_draft_point rm_draft_point_make(float x, float y);
 /* One stroke: the tool, the colour, and the points as written. */
 typedef struct rm_draft_stroke {
   rm_pen_tool tool;
-  /* The palette index, `tag 2` of the stroke. */
+  /* The palette index, `tag 2` of the stroke. Validated per tool:
+   * `RM_TOOL_SHADER` requires `RM_COLOR_HIGHLIGHT` + `has_argb`; highlighters
+   * accept `RM_COLOR_HIGHLIGHT` + `has_argb` or `{3, 4, 5, 8, 14, 15, 16}`
+   * without `has_argb`; erasers accept `0..16` excluding `9` without
+   * `has_argb`; drawing pens accept `{0, 1, 2, 6, 7, 10, 11, 12, 13}` without
+   * `has_argb`. */
   rm_pen_color color;
-  /* `tag 8`, 0xAARRGGBB. Set only where an index cannot name the colour:
-   * the shader's colours. The highlighter's blue and orange have indexes of
-   * their own (RM_COLOR_HIGHLIGHTER_BLUE, _ORANGE), which the tablet writes
-   * with no `argb`; some pages spell them as 9 plus `argb`. */
+  /* `tag 8`, 0xAARRGGBB. Allowed only with `RM_COLOR_HIGHLIGHT` (required for
+   * `RM_TOOL_SHADER`). */
   bool has_argb;
   uint32_t argb;
-  /* `thicknessScale` — the setting on the tablet, 1, 2 or 3, and not a
-   * factor: whatever it does to the line is already in each point's
-   * `width`. */
+  /* `thicknessScale` — `1.0` for highlighters; `1.0`, `2.0`, or `3.0` for
+   * other tools. */
   double thickness;
   const rm_draft_point* points;
   size_t point_count;
 } rm_draft_stroke;
 
-/* The defaults: no `argb` and a thickness of 2. The
- * points are borrowed, not copied. */
+/* The defaults: no `argb` and a thickness of `1.0` for highlighters or `2.0`
+ * otherwise. The points are borrowed, not copied. */
 RM_API rm_draft_stroke rm_draft_stroke_make(rm_pen_tool tool,
                                             rm_pen_color color,
                                             const rm_draft_point* points,
@@ -180,19 +186,14 @@ typedef struct rm_draft_image {
  *
  * Every array is borrowed for the duration of the call and copied nowhere. */
 typedef struct rm_page_draft {
-  /* The page's author, author index 1 of its identifier table. A
-   * document's `.content` spells the same UUID, in the same byte order. */
+  /* The page's author, author index 1 of its identifier table. Must be non-nil
+   * (at least one non-zero byte, `RM_ERR_INVALID_ARGUMENT`). A document's
+   * `.content` spells the same UUID, in the same byte order. */
   uint8_t author[16];
-  /* The author the formatting marks are written under, when the text
-   * carries any.
-   *
-   * A page with a bold or an italic stretch names a second author: on a
-   * tablet's page those marks are another session's edits, and their author
-   * index has to resolve in the table. What the value *is* decides nothing
-   * that is drawn — only that the index resolves. Left unset, one is
-   * derived from `author`, and derived the same way every time: a fresh
-   * UUID here would make the same draft write different bytes on every
-   * call. */
+  /* The author the formatting marks are written under, when non-empty
+   * paragraphs emit formatting marks; when supplied it must be non-nil and
+   * distinct from `author` (`RM_ERR_INVALID_ARGUMENT`). Left unset, one is
+   * derived deterministically from `author`. */
   bool has_marks_author;
   uint8_t marks_author[16];
   rm_draft_sheet sheet;

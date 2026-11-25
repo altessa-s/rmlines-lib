@@ -108,11 +108,13 @@ typedef enum rm_status : int {
  * Every field but `status` is only as meaningful as `status` says. */
 typedef struct rm_error {
   rm_status status;
-  /* Header generation for RM_ERR_UNSUPPORTED_VERSION, minimum reader
-   * version for RM_ERR_UNSUPPORTED_BLOCK_VERSION. */
+  /* Header generation for RM_ERR_UNSUPPORTED_VERSION (saturated to INT_MAX
+   * when the header declares >= INT_MAX), minimum reader version for
+   * RM_ERR_UNSUPPORTED_BLOCK_VERSION. */
   int version;
   /* RM_ERR_ANCHOR_OUT_OF_RANGE: the paragraph that was not there.
-   * RM_ERR_TOO_MANY_TO_NUMBER: the limit that was passed.
+   * RM_ERR_TOO_MANY_TO_NUMBER: the limit that was passed (a text block
+   * limit above LONG_MAX is reported as LONG_MAX).
    * RM_ERR_INCOMPLETE_PAGE: how many blocks would not read.
    * RM_ERR_UNSUPPORTED_BLOCK_VERSION: the top-level block type. */
   long value;
@@ -517,12 +519,13 @@ typedef struct rm_stroke {
   rm_item_id source_id;
 } rm_stroke;
 
-/* A highlight over the text of an imported PDF.
+/* A highlight over imported-PDF text or typed-text glyphs on a notebook page
+ * (`tag 7`/`tag 8` CRDT character IDs in `0x03`).
  *
  * Not a stroke, and that is the point of the type. Running the marker over
- * the text of a PDF writes a *glyph range*: the text, its place in the text
- * layer, and ready-made rectangles. The stroke recorded beside it is
- * degenerate — two points at one and the same x, for example, while the band
+ * text writes a *glyph range*: the text, its place in the text layer, and
+ * ready-made rectangles. The stroke recorded beside an imported-PDF highlight
+ * is degenerate — two points at one and the same x, for example, while the band
  * the tablet draws runs hundreds of points wide. Draw the stroke and nothing
  * appears; draw these rectangles and it does. */
 typedef struct rm_highlight {
@@ -532,7 +535,9 @@ typedef struct rm_highlight {
   size_t rectangle_count;
   rm_pen_color color;
   /* The explicit colour some pages carry, as on a stroke: where it is set
-   * it wins over `color`. */
+   * and `(argb & 0x00FFFFFFu) != 0`, it wins over `color`; renderers ignore
+   * `argb` values with all-zero RGB (`(argb & 0x00FFFFFFu) == 0`, such as
+   * placeholder `0xFF000000`). */
   bool has_argb;
   uint32_t argb;
   /* The words under the marker, as the tablet copied them out of the text
@@ -560,8 +565,8 @@ typedef struct rm_image_vertex {
 typedef struct rm_page_image {
   /* The attachment's file name in the document's index, e.g. "<uuid>.png". */
   rm_str file;
-  /* The four corners, in the order the file gives them — the indexes
-   * 0 1 2 2 3 0 make a quad of them. */
+  /* The four corners in file order. When present, the tag-4 index list
+   * must describe the tablet's two triangles, `{0, 1, 2, 2, 3, 0}`. */
   rm_image_vertex vertices[4];
   /* How many strokes of the page are drawn before this image. The scene is
    * one sequence and the z-order is the sequence: an image can lie over
@@ -583,8 +588,7 @@ typedef struct rm_page_image {
 typedef struct rm_page {
   const rm_stroke* strokes;
   size_t stroke_count;
-  /* Marker over the text of an imported PDF. Empty on a notebook, which has
-   * no text layer to highlight. */
+  /* Markers over imported-PDF text or notebook typed-text glyph ranges. */
   const rm_highlight* highlights;
   size_t highlight_count;
   /* The images placed on the page, in the scene's order. A page of captures

@@ -40,9 +40,14 @@ set(RMLINES_SOURCES
     src/rm_bytes.c
     src/rm_log.c
     src/rm_model.c
+    src/rm_crdt.c
+    src/rm_scene.c
+    src/rm_scene_query.c
     src/rm_parser.c
     src/rm_writer.c
     src/rm_editor.c
+    src/rm_node_edit.c
+    src/rm_layer_edit.c
     src/rm_session.c
     src/rm_text_edit.c
     src/rm_stroke_edit.c)
@@ -107,12 +112,15 @@ endif()
 # C23, all of them throughout — and a build that carries a second warning
 # dialect for a compiler that cannot read the code is a build with a branch
 # nobody can exercise.
-target_compile_options(rmlines PRIVATE
+set(RMLINES_WARNING_FLAGS
     -Wall -Wextra -Wshadow -Wconversion -Wsign-conversion
     -Wstrict-prototypes -Wmissing-prototypes -Wpointer-arith -Wcast-qual)
 if(RMLINES_WERROR)
-    target_compile_options(rmlines PRIVATE -Werror)
+    list(APPEND RMLINES_WARNING_FLAGS -Werror)
 endif()
+
+target_compile_options(rmlines PRIVATE ${RMLINES_WARNING_FLAGS})
+target_compile_features(rmlines PUBLIC c_std_23)
 # `isfinite` lives in libm on the platforms that still split it out.
 include(CheckLibraryExists)
 check_library_exists(m ceil "" RMLINES_HAVE_LIBM)
@@ -127,6 +135,7 @@ endif()
 if(RMLINES_BUILD_TOOLS)
     add_executable(rmdump tools/rmdump.c)
     target_link_libraries(rmdump PRIVATE rmlines)
+    target_compile_options(rmdump PRIVATE ${RMLINES_WARNING_FLAGS})
     set_target_properties(rmdump PROPERTIES C_STANDARD 23 C_STANDARD_REQUIRED ON
                                             C_EXTENSIONS OFF)
 endif()
@@ -142,6 +151,8 @@ if(RMLINES_BUILD_TESTS)
     # repair are read where the arithmetic is, not through a whole page — so
     # they compile the sources again rather than link the installed contract.
     add_library(rmlines_testing STATIC EXCLUDE_FROM_ALL ${RMLINES_SOURCES})
+    target_compile_options(rmlines_testing PRIVATE ${RMLINES_WARNING_FLAGS})
+    target_compile_features(rmlines_testing PUBLIC c_std_23)
     target_compile_definitions(rmlines_testing PUBLIC RMLINES_TESTING)
     target_include_directories(rmlines_testing PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -155,6 +166,7 @@ if(RMLINES_BUILD_TESTS)
     foreach(suite corpus model reader recovery writer log editor format_edges)
         add_executable(test_${suite} EXCLUDE_FROM_ALL tests/test_${suite}.c)
         target_link_libraries(test_${suite} PRIVATE rmlines_testing)
+        target_compile_options(test_${suite} PRIVATE ${RMLINES_WARNING_FLAGS})
         target_include_directories(test_${suite} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
         target_compile_definitions(test_${suite} PRIVATE
             RM_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
@@ -170,12 +182,15 @@ if(RMLINES_BUILD_TESTS)
     # libFuzzer is a clang runtime, and the sanitizers it wants are the CI
     # job's to ask for. The sample fixtures are its seed corpus.
     if(RMLINES_BUILD_FUZZERS)
-        add_executable(fuzz_parse tests/fuzz_parse.c)
-        target_link_libraries(fuzz_parse PRIVATE rmlines_testing)
-        target_compile_options(fuzz_parse PRIVATE -fsanitize=fuzzer)
-        target_link_options(fuzz_parse PRIVATE -fsanitize=fuzzer)
-        set_target_properties(fuzz_parse PROPERTIES
-            C_STANDARD 23 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+        foreach(fuzz_name fuzz_parse fuzz_edit)
+            add_executable(${fuzz_name} tests/${fuzz_name}.c)
+            target_link_libraries(${fuzz_name} PRIVATE rmlines_testing)
+            target_compile_options(${fuzz_name} PRIVATE ${RMLINES_WARNING_FLAGS}
+                                                        -fsanitize=fuzzer)
+            target_link_options(${fuzz_name} PRIVATE -fsanitize=fuzzer)
+            set_target_properties(${fuzz_name} PROPERTIES
+                C_STANDARD 23 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+        endforeach()
     endif()
 
     # `ctest` builds nothing on its own, and a suite that was never compiled is

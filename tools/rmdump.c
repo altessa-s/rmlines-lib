@@ -84,34 +84,105 @@ static const char* tool_name(rm_pen_tool tool) {
   return "unknown";
 }
 
+static int utf8_lead_len(unsigned char byte) {
+  if (byte < 0x80u) return 1;
+  if (byte >= 0xC2u && byte <= 0xDFu) return 2;
+  if (byte >= 0xE0u && byte <= 0xEFu) return 3;
+  if (byte >= 0xF0u && byte <= 0xF4u) return 4;
+  return 0;
+}
+
+static bool utf8_cont_ok(unsigned char lead, int pos, unsigned char byte) {
+  unsigned char low = 0x80u;
+  unsigned char high = 0xBFu;
+  if (pos == 1) {
+    if (lead == 0xE0u)
+      low = 0xA0u;
+    else if (lead == 0xEDu)
+      high = 0x9Fu;
+    else if (lead == 0xF0u)
+      low = 0x90u;
+    else if (lead == 0xF4u)
+      high = 0x8Fu;
+  }
+  return byte >= low && byte <= high;
+}
+
+static size_t utf8_next_subpart(const char* bytes, size_t len, size_t offset,
+                                bool* out_valid) {
+  unsigned char b = (unsigned char)bytes[offset];
+  int wanted = utf8_lead_len(b);
+  if (wanted == 0) {
+    *out_valid = false;
+    return 1;
+  }
+  size_t taken = 1;
+  while (taken < (size_t)wanted) {
+    if (offset + taken >= len ||
+        !utf8_cont_ok(b, (int)taken, (unsigned char)bytes[offset + taken])) {
+      *out_valid = false;
+      return taken;
+    }
+    taken += 1;
+  }
+  *out_valid = true;
+  return taken;
+}
+
 /* The text of a page reaches a terminal and a JSON reader alike, and neither
  * wants a raw control byte. Escaped the way JSON spells it, in both forms, so
  * that the two dumps differ only in their punctuation. */
 static void print_escaped(FILE* to, rm_str text) {
-  for (size_t i = 0; i < text.length; i += 1) {
+  size_t i = 0;
+  while (i < text.length) {
     unsigned char byte = (unsigned char)text.bytes[i];
-    switch (byte) {
-      case '"':
-        fputs("\\\"", to);
-        break;
-      case '\\':
-        fputs("\\\\", to);
-        break;
-      case '\n':
-        fputs("\\n", to);
-        break;
-      case '\r':
-        fputs("\\r", to);
-        break;
-      case '\t':
-        fputs("\\t", to);
-        break;
-      default:
-        if (byte < 0x20u)
-          fprintf(to, "\\u%04x", byte);
-        else
-          fputc((int)byte, to);
+    if (byte < 0x80u) {
+      switch (byte) {
+        case '"':
+          fputs("\\\"", to);
+          break;
+        case '\\':
+          fputs("\\\\", to);
+          break;
+        case '\n':
+          fputs("\\n", to);
+          break;
+        case '\r':
+          fputs("\\r", to);
+          break;
+        case '\t':
+          fputs("\\t", to);
+          break;
+        default:
+          if (byte < 0x20u)
+            fprintf(to, "\\u%04x", byte);
+          else
+            fputc((int)byte, to);
+      }
+      i += 1;
+      continue;
     }
+    bool valid = false;
+    size_t step = utf8_next_subpart(text.bytes, text.length, i, &valid);
+    if (valid)
+      fwrite(text.bytes + i, 1, step, to);
+    else
+      fputs("\xEF\xBF\xBD", to);
+    i += step;
+  }
+}
+
+static void print_anchor_json(bool has_anchor, const rm_text_anchor* anchor) {
+  if (has_anchor) {
+    printf(",\"anchor\":{\"paragraph\":%" PRId32 ",\"offset\":%" PRId32,
+           anchor->paragraph, anchor->offset);
+    if (anchor->has_origin_x)
+      printf(",\"originX\":%.17g", anchor->origin_x);
+    else
+      printf(",\"originX\":null");
+    printf("}");
+  } else {
+    printf(",\"anchor\":null");
   }
 }
 
@@ -282,17 +353,7 @@ static void dump_json(const rm_page* page, const char* name) {
       printf(",\"argb\":%" PRIu32, stroke->argb);
     else
       printf(",\"argb\":null");
-    if (stroke->has_anchor) {
-      printf(",\"anchor\":{\"paragraph\":%" PRId32 ",\"offset\":%" PRId32,
-             stroke->anchor.paragraph, stroke->anchor.offset);
-      if (stroke->anchor.has_origin_x)
-        printf(",\"originX\":%.17g", stroke->anchor.origin_x);
-      else
-        printf(",\"originX\":null");
-      printf("}");
-    } else {
-      printf(",\"anchor\":null");
-    }
+    print_anchor_json(stroke->has_anchor, &stroke->anchor);
     if (stroke->has_source_id) {
       printf(",\"sourceId\":\"%u:%" PRIu64 "\"",
              (unsigned)stroke->source_id.author, stroke->source_id.counter);
@@ -344,7 +405,9 @@ static void dump_json(const rm_page* page, const char* name) {
     const rm_page_image* image = &page->images[i];
     printf("%s{\"file\":\"", i == 0 ? "" : ",");
     print_escaped(stdout, image->file);
-    printf("\",\"strokesBefore\":%zu,\"vertices\":[", image->strokes_before);
+    printf("\",\"strokesBefore\":%zu", image->strokes_before);
+    print_anchor_json(image->has_anchor, &image->anchor);
+    printf(",\"vertices\":[");
     for (size_t v = 0; v < 4; v += 1) {
       printf("%s{\"x\":%.17g,\"y\":%.17g,\"u\":%.17g,\"v\":%.17g}",
              v == 0 ? "" : ",", image->vertices[v].x, image->vertices[v].y,
@@ -406,7 +469,7 @@ static unsigned char* read_file(const char* path, size_t* out_size) {
     return nullptr;
   }
   long size = ftell(file);
-  if (size < 0) {
+  if (size < 0 || (uintmax_t)size >= (uintmax_t)SIZE_MAX) {
     fclose(file);
     return nullptr;
   }
@@ -493,6 +556,10 @@ int main(int argc, char** argv) {
     else
       dump_text(page, basename_of(argv[i]));
     rm_page_free(page);
+  }
+  if (fflush(stdout) != 0 || ferror(stdout)) {
+    fprintf(stderr, "rmdump: stdout write failed\n");
+    return 1;
   }
   return failures == 0 ? 0 : 1;
 }

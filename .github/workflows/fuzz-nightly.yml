@@ -37,7 +37,7 @@ jobs:
           -DRMLINES_BUILD_FUZZERS=ON
           -DCMAKE_C_FLAGS="-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
       - name: Build
-        run: cmake --build build --target fuzz_parse
+        run: cmake --build build --target fuzz_parse fuzz_edit
 
       # Whatever last night found interesting, plus the fixtures as a floor.
       # The key changes on every run so that the cache is written back; the
@@ -54,10 +54,18 @@ jobs:
           cp tests/fixtures/v6-samples/*.rm tests/fixtures/*.rm corpus/
 
       - name: Fuzz
+        env:
+          MINUTES: ${{ inputs.minutes || '45' }}
         run: |
-          seconds=$(( ${{ inputs.minutes || 45 }} * 60 ))
+          if ! [[ "$MINUTES" =~ ^[0-9]+$ ]] || ! [ "$MINUTES" -gt 0 ] || ! [ "$MINUTES" -le 75 ]; then
+            echo "minutes must be a positive integer up to 75 (the job times out at 90, setup included)" >&2
+            exit 1
+          fi
+          each=$((10#$MINUTES * 30))
           ./build/fuzz_parse corpus \
-            -max_total_time="$seconds" -max_len=65536 -print_final_stats=1
+            -max_total_time="$each" -max_len=65536 -print_final_stats=1
+          ./build/fuzz_edit corpus \
+            -max_total_time="$each" -max_len=65536 -print_final_stats=1
 
       - name: Keep whatever crashed
         if: failure()
